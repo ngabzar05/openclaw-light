@@ -37,6 +37,28 @@ const STARTUP_PROGRESS_PHASES = new Set([
   "startup.maintenance.plugin-registry",
   "state.desktop-approval-admission",
   "sessions.admission",
+  // F9 (fork): session-migration sub-steps — the `sessions.admission`
+  // phase of the LAB baseline, split so a slow sub-step cannot hide.
+  "sessions.admission.deletion-snapshot",
+  "sessions.admission.store-identity",
+  "sessions.admission.acp-keys",
+  "sessions.admission.legacy-main-keys",
+  "sessions.admission.targets",
+  // F9 (fork): plugin-plan sub-steps — the `plugin-config` step of the
+  // LAB baseline, split out of `plugins.bootstrap`.
+  "plugins.bootstrap.subagent-registry",
+  "plugins.bootstrap.plan",
+  "plugins.bootstrap.activation-config",
+  "plugins.bootstrap.lookup-table",
+  // F9 (fork): HTTP transport construction + `startListening` internals —
+  // the unmeasured stretch between `gateway.request-runtime` and
+  // `http.bound` in the LAB baseline.
+  "gateway.http-transport",
+  "http.listen.tailscale-ingress",
+  "http.listen.bind",
+  "http.listen.portal-ingress",
+  "http.listen.sandbox-host",
+  "http.listen.plugin-listeners",
   "startup.maintenance.sessions",
   "startup.maintenance.session-orphans",
   "startup.maintenance.session-transcripts",

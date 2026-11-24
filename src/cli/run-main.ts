@@ -114,6 +114,9 @@ async function tryRunGatewayRunFastPath(
   if (!isGatewayRunFastPathArgv(argv)) {
     return false;
   }
+  // F9: measure each entry-graph chunk separately (still in parallel) so a
+  // slow chunk cannot hide inside the aggregate `gateway-run-imports` time.
+  // The outer span is kept so the existing trace shape is unchanged.
   const [
     { Command },
     { addGatewayRunCommand, bootstrapGatewayRun },
@@ -122,11 +125,14 @@ async function tryRunGatewayRunFastPath(
     { defaultRuntime },
   ] = await startupTrace.measure("gateway-run-imports", () =>
     Promise.all([
-      import("commander"),
-      import("./gateway-cli/run-command.js"),
-      import("../version.js"),
-      import("./banner.js"),
-      import("../runtime.js"),
+      startupTrace.measure("gateway-run-import.commander", () => import("commander")),
+      startupTrace.measure(
+        "gateway-run-import.run-command",
+        () => import("./gateway-cli/run-command.js"),
+      ),
+      startupTrace.measure("gateway-run-import.version", () => import("../version.js")),
+      startupTrace.measure("gateway-run-import.banner", () => import("./banner.js")),
+      startupTrace.measure("gateway-run-import.runtime", () => import("../runtime.js")),
     ]),
   );
   const commandPath = resolveGatewayCommandPath(argv) ?? ["gateway"];

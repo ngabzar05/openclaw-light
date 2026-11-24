@@ -1,4 +1,5 @@
 import { clearRuntimeConfigSnapshot } from "../../config/runtime-snapshot.js";
+import type { MobileBootOptions } from "../../gateway/mobile-boot.js";
 import { markGatewayRestartTrace } from "../../gateway/restart-trace.js";
 import type { GatewayServerOptions, GatewayStartupOperation } from "../../gateway/server-public.js";
 import type { GatewayInstallationReplacement } from "../../gateway/stale-install.js";
@@ -33,7 +34,19 @@ function assertGatewayStartupNotStopped(): void {
  * Until then the CLI signal owner holds any stop; custody is released before startup unwinds.
  */
 export async function prepareGatewayRunLoop(
-  params: { lockPort?: number; lifecycleLockDeadlineMs?: number },
+  params: {
+    lockPort?: number;
+    lifecycleLockDeadlineMs?: number;
+    /**
+     * Mobile boot profile (fork: A1), resolved once by the CLI gateway-run
+     * path. Lane C (F2) splice point: pass this into `acquireGatewayLock`
+     * below once that function accepts `MobileBootOptions` — this is the
+     * only lock acquisition on the CLI gateway-run path (direct servers
+     * acquire theirs in `src/gateway/server.ts`, from
+     * `GatewayServerOptions.mobileBoot`). Lane A wires no lock behavior.
+     */
+    mobileBoot?: MobileBootOptions;
+  },
   logger: Pick<SubsystemLogger, "info" | "warn">,
 ) {
   assertGatewayStartupNotStopped();

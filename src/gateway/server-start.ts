@@ -59,58 +59,66 @@ async function startGatewayServerWithSdkHost(
   let stopStartingTailscale: (() => void) | undefined;
   const { closeOnStartupFailure, prepareClose, terminalSessions, shutdownRuntime } = gatewayKernel;
   try {
-    const transport = await createGatewayHttpTransport({
-      ...gatewayKernel.createHttpTransportOptions(),
-      httpRequestLifetime: gatewayKernel.gatewayRequestContext,
-      waitForRequestRuntime: gatewayKernel.ensureRequestRuntimeReady,
-      updateCanary: opts.updateCanary,
-      onListening: opts.gatewayStateOwner?.markListening,
-      deferHookWake: async (request) => {
-        const owner = gatewayKernel.kernel.getReloadState().cronState;
-        const defer = owner.deferHookWake;
-        if (!defer) {
-          throw new Error("Scheduled Hook wake admission is unavailable; restart the Gateway");
-        }
-        const commitGuard = () => {
-          request.commitGuard();
-          if (
-            gatewayKernel.lifecycle.closePreludeStarted ||
-            gatewayKernel.kernel.getReloadState().cronState !== owner
-          ) {
-            throw new Error("Scheduled Hook wake owner changed; retry the request");
+    // F9: transport construction (HTTP server objects, route registry,
+    // portal service, WS server) was unmeasured — it sits between
+    // `gateway.request-runtime` and `http.listen` in the LAB baseline gap.
+    const transport = await gatewayKernel.startupTrace.measure("gateway.http-transport", () =>
+      createGatewayHttpTransport({
+        ...gatewayKernel.createHttpTransportOptions(),
+        httpRequestLifetime: gatewayKernel.gatewayRequestContext,
+        waitForRequestRuntime: gatewayKernel.ensureRequestRuntimeReady,
+        updateCanary: opts.updateCanary,
+        // F9: lets `startListening` measure its sub-steps (bind,
+        // portal ingress, sandbox host, plugin listeners).
+        startupTrace: gatewayKernel.startupTrace,
+        onListening: opts.gatewayStateOwner?.markListening,
+        deferHookWake: async (request) => {
+          const owner = gatewayKernel.kernel.getReloadState().cronState;
+          const defer = owner.deferHookWake;
+          if (!defer) {
+            throw new Error("Scheduled Hook wake admission is unavailable; restart the Gateway");
           }
-        };
-        commitGuard();
-        return await defer({ ...request, commitGuard });
-      },
-      ...(!gatewayKernel.minimalTestGateway && gatewayKernel.tailscaleMode !== "off"
-        ? {
-            prepareManagedTailscaleIngress: async (backend) => {
-              const { startGatewayTailscaleExposure } = await import("./server-tailscale.js");
-              const cleanup = await startGatewayTailscaleExposure({
-                tailscaleMode: gatewayKernel.tailscaleMode,
-                preserveFunnel: gatewayKernel.tailscaleConfig.preserveFunnel ?? false,
-                port,
-                backend,
-                controlUiBasePath: gatewayKernel.controlUiBasePath,
-                logTailscale,
-                signal,
-              });
-              gatewayKernel.kernel.setTailscaleCleanup(cleanup);
-              stopStartingTailscale = () => {
-                tailscaleStopping ??= cleanup?.();
-                void tailscaleStopping?.catch(() => {});
-              };
-              // Keep cancellation ownership until the full server close handle is published.
-              signal?.addEventListener("abort", stopStartingTailscale, { once: true });
-              if (signal?.aborted) {
-                stopStartingTailscale();
-                signal.throwIfAborted();
-              }
-            },
-          }
-        : {}),
-    });
+          const commitGuard = () => {
+            request.commitGuard();
+            if (
+              gatewayKernel.lifecycle.closePreludeStarted ||
+              gatewayKernel.kernel.getReloadState().cronState !== owner
+            ) {
+              throw new Error("Scheduled Hook wake owner changed; retry the request");
+            }
+          };
+          commitGuard();
+          return await defer({ ...request, commitGuard });
+        },
+        ...(!gatewayKernel.minimalTestGateway && gatewayKernel.tailscaleMode !== "off"
+          ? {
+              prepareManagedTailscaleIngress: async (backend) => {
+                const { startGatewayTailscaleExposure } = await import("./server-tailscale.js");
+                const cleanup = await startGatewayTailscaleExposure({
+                  tailscaleMode: gatewayKernel.tailscaleMode,
+                  preserveFunnel: gatewayKernel.tailscaleConfig.preserveFunnel ?? false,
+                  port,
+                  backend,
+                  controlUiBasePath: gatewayKernel.controlUiBasePath,
+                  logTailscale,
+                  signal,
+                });
+                gatewayKernel.kernel.setTailscaleCleanup(cleanup);
+                stopStartingTailscale = () => {
+                  tailscaleStopping ??= cleanup?.();
+                  void tailscaleStopping?.catch(() => {});
+                };
+                // Keep cancellation ownership until the full server close handle is published.
+                signal?.addEventListener("abort", stopStartingTailscale, { once: true });
+                if (signal?.aborted) {
+                  stopStartingTailscale();
+                  signal.throwIfAborted();
+                }
+              },
+            }
+          : {}),
+      }),
+    );
     gatewayKernel.transportBridge.attach(transport);
     const startup = await finishGatewayStartup({
       kernelRuntime: { ...gatewayKernel, ...transport },

@@ -27,6 +27,11 @@ export async function prepareGatewayStartupSessions(params: {
   agentIds?: ReadonlySet<string>;
   assertCurrent?: () => void;
   log: SessionStartupMigrationLogger;
+  /**
+   * F9 startup-trace measurement, injected by the gateway bootstrap.
+   * Passed straight through to `runSessionStartupMigration` (log-only).
+   */
+  measure?: <T>(name: string, run: () => T | Promise<T>) => Promise<T>;
 }): Promise<PreparedStartupSessionDatabase[]> {
   const databases: PreparedStartupSessionDatabase[] = [];
   await runSessionStartupMigration({

@@ -49,6 +49,7 @@ import { assertOpenClawStateWriteAllowedAtPath } from "../state/openclaw-state-o
 import { mergeGatewayAuthConfig } from "./auth-resolve.js";
 import { ADMIN_SCOPE } from "./method-scopes.js";
 import { listCoreGatewayMethodNames } from "./methods/core-method-policy.js";
+import { MOBILE_BOOT_DISABLED } from "./mobile-boot.js";
 import {
   mergeActivationSectionsIntoRuntimeConfig,
   resolveGatewayReloadPluginActivationCandidate,
@@ -101,6 +102,18 @@ async function prepareGatewayServerBootstrapSelected(input: {
     performance.now() - startupElapsedMs,
     opts.updateCanary,
   );
+  // A1: the mobile boot profile was resolved exactly once by the CLI
+  // gateway-run path (or by `startGatewayServer` for direct servers) and
+  // threaded in via `opts.mobileBoot`. Lane A wires NO behavior behind it
+  // yet — later lanes (B–G) read this value from the bootstrap return value
+  // (see `src/gateway/mobile-boot.ts` for the threading map). Logging the
+  // profile here is the observable proof the switch is plumbed end to end.
+  const mobileBoot = input.opts.mobileBoot ?? MOBILE_BOOT_DISABLED;
+  if (mobileBoot.enabled) {
+    log.info(
+      "mobile boot profile enabled (OPENCLAW_MOBILE_BOOT=1); fork fast-boot behaviors active per lane wiring",
+    );
+  }
   using startupTraceOwner = {
     transferred: false,
     [Symbol.dispose]() {
@@ -506,7 +519,14 @@ async function prepareGatewayServerBootstrapSelected(input: {
       return startupTrace.measure("sessions.admission", async () => {
         const { prepareGatewayStartupSessions } =
           await import("./server-startup-session-migration.js");
-        return prepareGatewayStartupSessions({ cfg: cfgAtStart, env: process.env, log });
+        return prepareGatewayStartupSessions({
+          cfg: cfgAtStart,
+          env: process.env,
+          log,
+          // F9: measure the migration sub-steps (deletion snapshot, ACP +
+          // legacy-main key checks, per-target worker-pool drain).
+          measure: (name, run) => startupTrace.measure(name, run),
+        });
       });
     })(),
     startupTrace.measure("plugins.bootstrap-imports", () => import("./server-startup-plugins.js")),
@@ -530,19 +550,30 @@ async function prepareGatewayServerBootstrapSelected(input: {
   publishSystemEventStoreConfig(cfgAtStart);
   const pluginBootstrap = await startupTrace.measure("plugins.bootstrap", async () => {
     if (!opts.updateCanary) {
-      const { initSubagentRegistry } =
-        await import("../agents/subagents/registry/subagent-registry.js");
-      await initSubagentRegistry();
+      // F9: subagent-registry init is the only work in this branch; measure
+      // it separately so a slow registry init cannot hide inside the
+      // plugin-plan time.
+      await startupTrace.measure("plugins.bootstrap.subagent-registry", async () => {
+        const { initSubagentRegistry } =
+          await import("../agents/subagents/registry/subagent-registry.js");
+        await initSubagentRegistry();
+      });
     }
-    return prepareGatewayPluginBootstrap({
-      cfgAtStart,
-      activationSourceConfig: startupActivationSourceConfig,
-      pluginMetadataSnapshot: startupConfigLoad.pluginMetadataSnapshot,
-      workerProviderIds: workerEnvironmentStartup?.durableProviderIds ?? [],
-      minimalTestGateway,
-      ambientEnvTriggers,
-      log,
-    });
+    // F9: the plugin plan (activation config + lookup table) is the
+    // `plugin-config` step of the LAB baseline; measure it apart from the
+    // registry init above.
+    return startupTrace.measure("plugins.bootstrap.plan", () =>
+      prepareGatewayPluginBootstrap({
+        cfgAtStart,
+        activationSourceConfig: startupActivationSourceConfig,
+        pluginMetadataSnapshot: startupConfigLoad.pluginMetadataSnapshot,
+        workerProviderIds: workerEnvironmentStartup?.durableProviderIds ?? [],
+        minimalTestGateway,
+        ambientEnvTriggers,
+        log,
+        startupTrace,
+      }),
+    );
   });
   const {
     gatewayPluginConfigAtStart,
@@ -597,6 +628,9 @@ async function prepareGatewayServerBootstrapSelected(input: {
     opts,
     minimalTestGateway,
     ambientEnvTriggers,
+    // A1: resolved mobile boot profile, for lanes B–G to consume. `enabled:
+    // false` means pure upstream behavior.
+    mobileBoot,
     startupTrace,
     configSnapshot,
     startupActivationSourceConfig,

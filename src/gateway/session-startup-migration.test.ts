@@ -145,6 +145,33 @@ describe("runStartupSessionMaintenanceForTest", () => {
     }
   });
 
+  it("F9: measures the admission sub-steps without changing the handoff", async () => {
+    const agentIds = ["fleet-a", "fleet-b"];
+    const { env, cfg } = fleetFixture(agentIds);
+    await closeAgentDatabases();
+    const measured: string[] = [];
+    const measure = async <T>(name: string, run: () => T | Promise<T>): Promise<T> => {
+      measured.push(name);
+      return await run();
+    };
+    const databases = await prepareGatewayStartupSessions({
+      cfg,
+      env,
+      log: makeLog(),
+      measure,
+    });
+    expect(measured).toEqual([
+      "sessions.admission.deletion-snapshot",
+      "sessions.admission.store-identity",
+      "sessions.admission.acp-keys",
+      "sessions.admission.legacy-main-keys",
+      "sessions.admission.targets",
+    ]);
+    expect(databases.map((database) => database.database.agentId).toSorted()).toEqual(
+      agentIds.toSorted(),
+    );
+  });
+
   it("hands the cold maintenance connection directly to failed reconciliation", async () => {
     const { stateDir, env } = fleetFixture(["main"]);
     const cfg: OpenClawConfig = { agents: { entries: { main: {} } } };

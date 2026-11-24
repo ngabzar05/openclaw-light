@@ -25,6 +25,7 @@ import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { hasConfiguredSecretInput } from "../../config/types.secrets.js";
 import { GATEWAY_SERVICE_RUNTIME_PID_ENV } from "../../daemon/constants.js";
 import { createConfiguredGatewayLocalProbe } from "../../gateway/local-http-probe.js";
+import { resolveMobileBootOptions } from "../../gateway/mobile-boot.js";
 import {
   defaultGatewayBindMode,
   isContainerEnvironment,
@@ -369,6 +370,11 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     process.env[GATEWAY_SERVICE_RUNTIME_PID_ENV],
   );
   normalizeStateDirEnv(process.env);
+  // A1: resolve the mobile boot profile exactly once for this gateway run,
+  // before any config-env rebuilding, and thread the resolved value down
+  // (run loop → lock site, and `startGatewayServer` → bootstrap). Nothing
+  // downstream reads `OPENCLAW_MOBILE_BOOT` itself.
+  const mobileBoot = resolveMobileBootOptions(process.env);
   const { clearGatewayRunConfigEnvironment } = await import("./pre-bootstrap.js");
   clearGatewayRunConfigEnvironment();
   const isDevProfile = normalizeOptionalLowercaseString(process.env.OPENCLAW_PROFILE) === "dev";
@@ -861,6 +867,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
       lockPort: port,
       lifecycleLockDeadlineMs,
       healthHost,
+      mobileBoot,
       beginBoot,
       completeBoot,
       onProcessResourcesSettled: hooks.onProcessResourcesSettled,
@@ -871,6 +878,7 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
         startupConfigSnapshotReadForNextStart = undefined;
         return await startGatewayServer(port, {
           bind,
+          mobileBoot,
           ...(opts.updateCanary ? { updateCanary: true } : {}),
           ...(activeBootId ? { bootId: activeBootId } : {}),
           auth: authOverride,
