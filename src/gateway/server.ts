@@ -12,6 +12,7 @@ import { supportsSpawnBrokerCommandTransport } from "../process/spawn-broker/pip
 import { getProcessCleanupBudget } from "../process/supervisor/cleanup-budget.js";
 import { settlesWithin } from "../shared/settle-within.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
+import { resolveMobileBootOptions } from "./mobile-boot.js";
 import { formatGatewayPendingCloseSteps, measureGatewayCloseStep } from "./restart-trace.js";
 import type { GatewayServer, GatewayServerOptions } from "./server-public.js";
 import {
@@ -73,19 +74,31 @@ export async function startGatewayServer(
   port = 18789,
   opts: GatewayServerOptions = {},
 ): ReturnType<typeof import("./server-start.js").startGatewayServerCore> {
+  // A1: the mobile boot profile is resolved exactly once per process by the
+  // CLI gateway-run path and threaded in via `opts.mobileBoot`. Direct/embed
+  // callers that do not supply it fall back to a single env read here, so
+  // no downstream code ever reads `OPENCLAW_MOBILE_BOOT` itself.
+  const mobileBoot = opts.mobileBoot ?? resolveMobileBootOptions(process.env);
+  const serverOpts: GatewayServerOptions = { ...opts, mobileBoot };
   installDatabaseProcessRole("gateway");
   const { installGatewayDatabaseEngine } = await import("./server-database-engine.js");
-  await installGatewayDatabaseEngine(
-    opts.startupConfigSnapshotRead?.snapshot,
-    opts.startupConfigSnapshotRead?.databaseEngineSelection,
+  await measureGatewayBootstrapStep("gateway.database-engine-install", () =>
+    installGatewayDatabaseEngine(
+      serverOpts.startupConfigSnapshotRead?.snapshot,
+      serverOpts.startupConfigSnapshotRead?.databaseEngineSelection,
+    ),
   );
   const { initializeSqliteRuntime } = await import("../infra/sqlite-runtime-initialize.js");
-  await initializeSqliteRuntime();
+  await measureGatewayBootstrapStep("gateway.sqlite-runtime-initialize", () =>
+    initializeSqliteRuntime(),
+  );
   const { acquireGatewayLock } = await import("../infra/gateway-lock.js");
-  const ownedLock = opts.gatewayStateOwner
+  const ownedLock = serverOpts.gatewayStateOwner
     ? null
-    : await acquireGatewayLock({ port, listenerMode: "foreground" });
-  const gatewayStateOwner = opts.gatewayStateOwner ?? ownedLock ?? undefined;
+    : await measureGatewayBootstrapStep("gateway.lock-acquire", () =>
+        acquireGatewayLock({ port, listenerMode: "foreground" }),
+      );
+  const gatewayStateOwner = serverOpts.gatewayStateOwner ?? ownedLock ?? undefined;
   let close: GatewayServer["close"] | undefined;
   let detachOwner: (() => void) | undefined;
   try {
@@ -97,7 +110,7 @@ export async function startGatewayServer(
     const signal = captureGatewayStateOwner(databasePath)?.signal;
     const onOwnerLost = () => {
       const reason = String(signal?.reason);
-      const restart = close ? opts.hotReloadRecovery?.(reason) : undefined;
+      const restart = close ? serverOpts.hotReloadRecovery?.(reason) : undefined;
       if (close && (!restart || restart.status === "failed")) {
         void close({ reason }).catch((error: unknown) => {
           log.error(`Gateway lost ownership cleanup failed: ${String(error)}`);
@@ -107,7 +120,7 @@ export async function startGatewayServer(
     signal?.addEventListener("abort", onOwnerLost, { once: true });
     detachOwner = () => signal?.removeEventListener("abort", onOwnerLost);
     signal?.throwIfAborted();
-    const server = await startGatewayServerWithRuntime(port, { ...opts, gatewayStateOwner });
+    const server = await startGatewayServerWithRuntime(port, { ...serverOpts, gatewayStateOwner });
     let closing: Promise<void> | undefined;
     const closeServer: GatewayServer["close"] = (closeOptions) => {
       detachOwner?.();
@@ -123,7 +136,7 @@ export async function startGatewayServer(
       return await rethrowGatewayStartupError(reason, () =>
         closeServer({
           reason: String(reason),
-          exitAfterClose: opts.exitAfterStartupFailure?.(reason),
+          exitAfterClose: serverOpts.exitAfterStartupFailure?.(reason),
         }),
       );
     }

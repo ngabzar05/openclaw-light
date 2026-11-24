@@ -221,12 +221,12 @@ tool yang tidak ada); melewati `plugins.deny` di katalog (N7).
 
 | Perubahan | Status | Keterangan |
 |---|---|---|
-| A1 | ⏳ BELUM | Saklar `OPENCLAW_MOBILE_BOOT=1` |
-| F9 | ⏳ BELUM | Instrumentasi celah + baseline ulang |
+| A1 | ✅ SELESAI | Saklar `OPENCLAW_MOBILE_BOOT=1` — `src/gateway/mobile-boot.ts` + plumbing titik masuk (`run.ts`, `run-loop.ts`, `run-loop-startup.ts`, `server.ts`, `server-public.ts`, `server-startup-bootstrap.ts`). OFF = upstream murni; ON di Lane A tanpa perubahan perilaku (hanya baca + log). Smoke ON lolos (MEASUREMENT.md §5). Threading penuh ke lock/admission/plugin loader diserahkan ke Lane B/C/D |
+| F9 | ✅ SELESAI | Instrumentasi celah + baseline ulang — 15+ nama fase baru, 285 fase terukur, baseline 2× OFF + 1× ON (MEASUREMENT.md §4–§5). Vonis: tidak ada celah ~150 dtk di LAB native; titik pisah F4 ADA di `http.bound` |
 | F1 | ⏳ BELUM | Defer admission + gerbang RPC |
 | F2 | ⏳ BELUM | Fast-path lock |
 | F3 | ⏳ BELUM | Pecah bootstrap |
-| F4 | ⏳ BELUM | Early-listen / proses depan tipis |
+| F4 | ✅ LAYAK (vonis F9) | Early-listen / proses depan tipis — titik pisah terbukti di `http.bound` (~26 dtk [LAB]); kemenangan LAB native ~13 dtk post-attach |
 | F5 | ⏳ BELUM | Capture async + lazy plugin |
 | F6 | ⏳ BELUM | Code-split entry |
 | F8 | ⏳ BELUM | Matikan update-admission |

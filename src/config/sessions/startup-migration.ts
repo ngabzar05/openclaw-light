@@ -222,13 +222,21 @@ export async function runSessionStartupMigration(params: {
   assertCurrent?: () => void;
   log: SessionStartupMigrationLogger;
   handoffDatabase?: (database: OpenClawAgentDatabaseOptions) => Promise<void>;
+  /**
+   * Optional startup-trace measurement, injected by the gateway bootstrap
+   * (F9). The config layer never imports the gateway trace itself, so the
+   * dependency stays one-directional. When absent, steps run unmeasured.
+   */
+  measure?: <T>(name: string, run: () => T | Promise<T>) => Promise<T>;
 }): Promise<void> {
   params.assertCurrent?.();
+  const measure =
+    params.measure ??
+    (<T>(_name: string, run: () => T | Promise<T>): Promise<T> => Promise.resolve().then(run));
   const env = cloneEnvWithPlatformSemantics(params.env ?? process.env);
-  const { snapshot } = await prepareAgentDatabaseDeletionSnapshotRead(
-    { env },
-    "runtime-discovery",
-  ).read();
+  const { snapshot } = await measure("sessions.admission.deletion-snapshot", () =>
+    prepareAgentDatabaseDeletionSnapshotRead({ env }, "runtime-discovery").read(),
+  );
   params.assertCurrent?.();
   const discovery = gatewayDiscoveryReadOptions(params.cfg, { env, snapshot });
   const registeredDatabaseRows = discovery.registeredDatabases ?? [];
@@ -247,13 +255,15 @@ export async function runSessionStartupMigration(params: {
   });
   // Stable installations may still have file-backed history. Only Doctor imports it;
   // do not serve an empty SQLite history or rewrite those files during startup.
-  withEngineStoreAdmission(() =>
-    assertSessionStoreMigrationComplete({
-      cfg: params.cfg,
-      env,
-      targets,
-      registeredDatabases: registeredDatabaseRows,
-    }),
+  await measure("sessions.admission.store-identity", () =>
+    withEngineStoreAdmission(() =>
+      assertSessionStoreMigrationComplete({
+        cfg: params.cfg,
+        env,
+        targets,
+        registeredDatabases: registeredDatabaseRows,
+      }),
+    ),
   );
   const { assertAcpSessionKeysMigratedForStartup, assertEmbeddedAcpMetadataMigratedForStartup } =
     await import("../../acp/runtime/session-meta-startup.js");
@@ -262,18 +272,22 @@ export async function runSessionStartupMigration(params: {
   const [, result] = await settleCurrentReadPreparations([
     params.agentIds
       ? undefined
-      : assertAcpSessionKeysMigratedForStartup(
-          params.cfg,
-          env,
-          targets.map((target) => target.agentId),
-          undefined,
-          params.assertCurrent,
-          discovery.excludeTarget,
+      : measure("sessions.admission.acp-keys", () =>
+          assertAcpSessionKeysMigratedForStartup(
+            params.cfg,
+            env,
+            targets.map((target) => target.agentId),
+            undefined,
+            params.assertCurrent,
+            discovery.excludeTarget,
+          ),
         ),
     // Fleet-wide guidance belongs to boot; a deferred agent must not wait on other stores.
     params.agentIds
       ? undefined
-      : migrateLegacyMainSessionKeys({ cfg: params.cfg, env, mode: "detect" }),
+      : measure("sessions.admission.legacy-main-keys", () =>
+          migrateLegacyMainSessionKeys({ cfg: params.cfg, env, mode: "detect" }),
+        ),
   ] as const);
   params.assertCurrent?.();
   if (result && result.warnings.length > 0) {
@@ -395,17 +409,19 @@ export async function runSessionStartupMigration(params: {
     await import("./session-accessor.sqlite-canonical-worker-pool.js");
   const errors = new Set<unknown>();
   try {
-    await withSqliteCanonicalValidationWorkerPool(env, async () => {
-      const { hasError, firstError } = await runTasksWithConcurrency({
-        tasks,
-        limit: AGENT_DATABASE_PREFLIGHT_CONCURRENCY,
-        errorMode: "stop",
-      });
-      if (hasError) {
-        errors.add(firstError);
-        throw firstError;
-      }
-    });
+    await measure("sessions.admission.targets", () =>
+      withSqliteCanonicalValidationWorkerPool(env, async () => {
+        const { hasError, firstError } = await runTasksWithConcurrency({
+          tasks,
+          limit: AGENT_DATABASE_PREFLIGHT_CONCURRENCY,
+          errorMode: "stop",
+        });
+        if (hasError) {
+          errors.add(firstError);
+          throw firstError;
+        }
+      }),
+    );
   } catch (error) {
     errors.add(error);
   }

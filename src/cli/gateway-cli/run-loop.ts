@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
+import type { MobileBootOptions } from "../../gateway/mobile-boot.js";
 import * as restartTrace from "../../gateway/restart-trace.js";
 import { GatewayStartupCleanupError } from "../../gateway/server-shutdown.js";
 import type { startGatewayServer } from "../../gateway/server.js";
@@ -65,6 +66,13 @@ export async function runGatewayLoop(params: {
   lockPort?: number;
   lifecycleLockDeadlineMs?: number;
   healthHost?: string;
+  /**
+   * Mobile boot profile (fork: A1), resolved once by the CLI gateway-run
+   * path. Forwarded to `prepareGatewayRunLoop` so the lock acquisition site
+   * (Lane C, F2) can consume it; the run loop itself applies no behavior
+   * from it.
+   */
+  mobileBoot?: MobileBootOptions;
   beginBoot?: (startedAtMs: number) => void | Promise<void>;
   completeBoot?: (completion: GatewayBootLifecycleCompletion) => void | Promise<void>;
   /** Reports terminal cleanup disposition, never mere invocation or exit intent. */

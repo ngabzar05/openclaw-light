@@ -144,38 +144,49 @@ export async function prepareGatewayPluginBootstrap(params: {
   minimalTestGateway: boolean;
   log: GatewayPluginBootstrapLog;
   ambientEnvTriggers?: AmbientEnvTriggerPolicy;
+  /** F9 startup trace; when absent the plan steps run unmeasured. */
+  startupTrace?: GatewayStartupTrace;
 }) {
   const activationSourceConfig = params.activationSourceConfig ?? params.cfgAtStart;
 
   // Activation uses the pre-runtime source so auto-enable policy cannot be skewed by
   // defaults injected while loading runtime config; runtime-only plugin config still merges in.
+  // F9: this is the `plugin-config` step of the LAB baseline (activation
+  // resolution, before the lookup table is built).
   const gatewayPluginConfig = params.minimalTestGateway
     ? params.cfgAtStart
-    : resolveGatewayStartupPluginActivationConfig({
-        runtimeConfig: params.cfgAtStart,
-        activationSourceConfig,
-        env: process.env,
-        ...(params.pluginMetadataSnapshot?.manifestRegistry
-          ? { manifestRegistry: params.pluginMetadataSnapshot.manifestRegistry }
-          : {}),
-        discovery: params.pluginMetadataSnapshot?.discovery,
-        ambientEnvTriggers: params.ambientEnvTriggers,
-      });
+    : await measureStartup(params.startupTrace, "plugins.bootstrap.activation-config", () =>
+        resolveGatewayStartupPluginActivationConfig({
+          runtimeConfig: params.cfgAtStart,
+          activationSourceConfig,
+          env: process.env,
+          ...(params.pluginMetadataSnapshot?.manifestRegistry
+            ? { manifestRegistry: params.pluginMetadataSnapshot.manifestRegistry }
+            : {}),
+          discovery: params.pluginMetadataSnapshot?.discovery,
+          ambientEnvTriggers: params.ambientEnvTriggers,
+        }),
+      );
   const pluginsGloballyDisabled = gatewayPluginConfig.plugins?.enabled === false;
   const pluginWorkspaceDir = tryResolveConfiguredAgentWorkspaceDir(gatewayPluginConfig);
   const defaultWorkspaceDir = pluginWorkspaceDir ?? resolveDefaultAgentWorkspaceDir();
+  // F9: the lookup table (manifest registry + startup plan, incl.
+  // `loadGatewayStartupPluginPlanWithMetadata`) is the bulk of the
+  // `plugin-config` step; measure it apart from activation resolution.
   const pluginLookUpTable =
     params.minimalTestGateway || pluginsGloballyDisabled
       ? undefined
-      : loadPluginLookUpTable({
-          config: gatewayPluginConfig,
-          workspaceDir: pluginWorkspaceDir,
-          env: process.env,
-          activationSourceConfig,
-          metadataSnapshot: params.pluginMetadataSnapshot,
-          workerProviderIds: params.workerProviderIds ?? [],
-          ambientEnvTriggers: params.ambientEnvTriggers,
-        });
+      : await measureStartup(params.startupTrace, "plugins.bootstrap.lookup-table", () =>
+          loadPluginLookUpTable({
+            config: gatewayPluginConfig,
+            workspaceDir: pluginWorkspaceDir,
+            env: process.env,
+            activationSourceConfig,
+            metadataSnapshot: params.pluginMetadataSnapshot,
+            workerProviderIds: params.workerProviderIds ?? [],
+            ambientEnvTriggers: params.ambientEnvTriggers,
+          }),
+        );
   // Startup logging and lifecycle publication consume the process-stable metadata snapshot.
   // Minimal gateways skip runtime lookup-table construction, not metadata ownership.
   const pluginManifestRecords =

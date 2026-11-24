@@ -4,6 +4,7 @@ import type { GatewayActiveWorkSnapshot } from "../infra/gateway-active-work.js"
 import type { GatewaySuspendHandoffOwner } from "../infra/gateway-suspend-coordinator.js";
 import type { GatewayRestartEmitter } from "../infra/restart.js";
 import type { GatewayTailscaleIngressEndpoint } from "./ingress-attribution.js";
+import type { MobileBootOptions } from "./mobile-boot.js";
 import type { ChannelAutostartSuppression } from "./server-channels.js";
 import type { GatewaySidecarStartupMode } from "./server-sidecar-startup-mode.js";
 
@@ -128,4 +129,12 @@ export type GatewayServerOptions = {
   };
   /** Restart request override; direct servers fail closed on restart-required reloads. */
   hotReloadRecovery?: GatewayRestartEmitter;
+  /**
+   * Mobile boot profile (fork: A1). Resolved once from
+   * `OPENCLAW_MOBILE_BOOT` by the CLI gateway-run path (see
+   * `src/gateway/mobile-boot.ts`); absent means disabled, i.e. pure
+   * upstream behavior. Later lanes (B–G) gate their behavior on this
+   * value; they must not re-read the env var.
+   */
+  mobileBoot?: MobileBootOptions;
 };

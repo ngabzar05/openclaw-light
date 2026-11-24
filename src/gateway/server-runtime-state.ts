@@ -40,6 +40,7 @@ import type { ControlUiRootState } from "./server-control-ui-root.js";
 import { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";
 import { createGatewayHttpServer, getGatewayHttpRequestHandler } from "./server-http.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
+import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
 import type { HookClientIpConfig, HooksRequestHandler } from "./server/hooks-request-handler.js";
 import { listenGatewayHttpServer } from "./server/http-listen.js";
 import { runWithGatewayHttpWorkAdmission } from "./server/http-work-admission.js";
@@ -127,6 +128,12 @@ export async function createGatewayHttpTransport(params: {
   clients: Set<GatewayWsClient>;
   tailscaleMode?: "off" | GatewayTailscaleIngressMode;
   prepareManagedTailscaleIngress?: (endpoint: GatewayTailscaleIngressEndpoint) => Promise<void>;
+  /**
+   * F9 startup trace (optional). When present, `startListening` measures
+   * its sub-steps (tailscale ingress, per-host bind, portal ingress,
+   * sandbox host, plugin legacy listeners); when absent it runs unmeasured.
+   */
+  startupTrace?: GatewayStartupTrace;
 }): Promise<{
   httpServer: HttpServer;
   httpServers: HttpServer[];
@@ -527,21 +534,25 @@ export async function createGatewayHttpTransport(params: {
     // Listening is idempotent for callers racing startup. A failure is terminal for this runtime
     // state; the startup owner tears down every partially bound HTTP/WS server before retrying.
     startListeningPromise = (async () => {
+      // F9: `http.listen` was one opaque span in the LAB baseline; split it
+      // so the listen gap (221–304 dtk) can be attributed per sub-step.
       if (tailscaleHttpServer) {
-        await listenGatewayHttpServer({
-          httpServer: tailscaleHttpServer,
-          bindHost: "127.0.0.1",
-          port: 0,
-          retryEaddrinuse: false,
-          serviceName: "Tailscale gateway ingress",
+        await measureStartup(params.startupTrace, "http.listen.tailscale-ingress", async () => {
+          await listenGatewayHttpServer({
+            httpServer: tailscaleHttpServer,
+            bindHost: "127.0.0.1",
+            port: 0,
+            retryEaddrinuse: false,
+            serviceName: "Tailscale gateway ingress",
+          });
+          const address = tailscaleHttpServer.address();
+          if (!address || typeof address === "string") {
+            throw new Error("Tailscale gateway ingress failed to resolve its loopback port");
+          }
+          tailscaleIngressEndpoint = { host: "127.0.0.1", port: address.port };
+          // Publish the private target before ordinary ingress can accept requests.
+          await params.prepareManagedTailscaleIngress?.(tailscaleIngressEndpoint);
         });
-        const address = tailscaleHttpServer.address();
-        if (!address || typeof address === "string") {
-          throw new Error("Tailscale gateway ingress failed to resolve its loopback port");
-        }
-        tailscaleIngressEndpoint = { host: "127.0.0.1", port: address.port };
-        // Publish the private target before ordinary ingress can accept requests.
-        await params.prepareManagedTailscaleIngress?.(tailscaleIngressEndpoint);
       }
       const requiredAlias =
         params.bindHost !== "127.0.0.1" && bindHosts.includes("127.0.0.1")
@@ -553,53 +564,61 @@ export async function createGatewayHttpTransport(params: {
         ? [requiredAlias, ...bindHosts.filter((host) => host !== requiredAlias)]
         : bindHosts;
       const boundHosts = new Set<string>();
-      for (const host of listenOrder) {
-        const index = bindHosts.indexOf(host);
-        const server = gatewayHttpServers[index];
-        if (!server) {
-          throw new Error(`Missing gateway HTTP server for bind host ${host}`);
-        }
-        // Specific IPv4 modes rely on this canonical local endpoint for authenticated
-        // helpers. A collision must fail startup instead of sending credentials to it.
-        const requiredLoopbackAlias = host === requiredAlias;
-        try {
-          if (server !== params.testListener) {
-            await listenGatewayHttpServer({
-              httpServer: server,
-              bindHost: host,
-              port: params.port,
-              retryEaddrinuse: !requiredLoopbackAlias,
-            });
+      await measureStartup(params.startupTrace, "http.listen.bind", async () => {
+        for (const host of listenOrder) {
+          const index = bindHosts.indexOf(host);
+          const server = gatewayHttpServers[index];
+          if (!server) {
+            throw new Error(`Missing gateway HTTP server for bind host ${host}`);
           }
-          boundHosts.add(host);
-        } catch (err) {
-          if (host === bindHosts[0] || requiredLoopbackAlias) {
-            throw err;
+          // Specific IPv4 modes rely on this canonical local endpoint for authenticated
+          // helpers. A collision must fail startup instead of sending credentials to it.
+          const requiredLoopbackAlias = host === requiredAlias;
+          try {
+            if (server !== params.testListener) {
+              await listenGatewayHttpServer({
+                httpServer: server,
+                bindHost: host,
+                port: params.port,
+                retryEaddrinuse: !requiredLoopbackAlias,
+              });
+            }
+            boundHosts.add(host);
+          } catch (err) {
+            if (host === bindHosts[0] || requiredLoopbackAlias) {
+              throw err;
+            }
+            params.log.warn(
+              `gateway: failed to bind loopback alias ${host}:${params.port} (${String(err)})`,
+            );
           }
-          params.log.warn(
-            `gateway: failed to bind loopback alias ${host}:${params.port} (${String(err)})`,
-          );
         }
-      }
+      });
       httpBindHosts.push(...bindHosts.filter((host) => boundHosts.has(host)));
       if (httpBindHosts.length === 0) {
         throw new Error("Gateway HTTP server failed to start");
       }
       params.onListening?.();
       if (!params.updateCanary) {
-        await portalService.startIngress();
+        await measureStartup(params.startupTrace, "http.listen.portal-ingress", () =>
+          portalService.startIngress(),
+        );
       }
       // Published updaters retain the live sandbox port but already pass --update-canary.
       if (!params.updateCanary && params.cfg.mcp?.apps?.enabled === true) {
-        await startSandboxHost();
+        await measureStartup(params.startupTrace, "http.listen.sandbox-host", () =>
+          startSandboxHost(),
+        );
       }
       if (!params.updateCanary) {
-        startPluginLegacyListeners({
-          gatewayServer: httpServer,
-          httpServers,
-          getRegistry: resolvePluginRouteRegistry,
-          warn: (message) => params.logPlugins.warn(message),
-        });
+        await measureStartup(params.startupTrace, "http.listen.plugin-listeners", () =>
+          startPluginLegacyListeners({
+            gatewayServer: httpServer,
+            httpServers,
+            getRegistry: resolvePluginRouteRegistry,
+            warn: (message) => params.logPlugins.warn(message),
+          }),
+        );
       }
       startListeningComplete = true;
     })();

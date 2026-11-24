@@ -33,6 +33,12 @@ const STARTUP_PROGRESS_PHASES = new Set([
   "cli.main.gateway-run-select-environment",
   "cli.main.gateway-run-select-environment-imports",
   "cli.main.gateway-run-imports",
+  // F9 (fork): per-chunk entry-graph imports of the gateway-run fast path.
+  "cli.main.gateway-run-import.commander",
+  "cli.main.gateway-run-import.run-command",
+  "cli.main.gateway-run-import.version",
+  "cli.main.gateway-run-import.banner",
+  "cli.main.gateway-run-import.runtime",
   "cli.main.gateway-run-pre-bootstrap",
   "cli.main.gateway-run-bootstrap",
   "cli.main.gateway-run-reload-environment",
@@ -40,6 +46,10 @@ const STARTUP_PROGRESS_PHASES = new Set([
 const BOOTSTRAP_PROGRESS_PHASES = new Set([
   "cli.bootstrap.admission.database-readiness",
   "gateway.server-start-import",
+  // F9 (fork): direct-server pre-start steps in `src/gateway/server.ts`.
+  "gateway.database-engine-install",
+  "gateway.sqlite-runtime-initialize",
+  "gateway.lock-acquire",
 ]);
 const ENVIRONMENT_PROGRESS_PHASES = new Set([
   "cli.environment.imports",
