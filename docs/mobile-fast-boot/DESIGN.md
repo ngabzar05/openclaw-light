@@ -234,3 +234,4 @@ tool yang tidak ada); melewati `plugins.deny` di katalog (N7).
 | A4 | ⏳ BELUM | Migrasi inkremental |
 | W1/W2/W3 | ⏳ BELUM | Katalog malas + cache + bundle ringan |
 | D2 | ⏳ BELUM | Hapus prebuild `.node` non-arm64 |
+| Lane H (dokumentasi) | ✅ SELESAI (25 Nov 2026) | `docs/mobile-fast-boot/REBASE-GUIDE.md`, `BUILD-PUBLISH.md`, `GUARDRAILS.md`, `VERIFY.md` — ditulis Lane H, basis v2026.11.6, tanpa perubahan kode. Butir [BELUM TERUKUR] di tiap dokumen menunggu Lane A/G + ronde perangkat (lihat VERIFY.md §5). |
