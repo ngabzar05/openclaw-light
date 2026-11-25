@@ -326,6 +326,10 @@ export async function runGatewayLoop(params: {
             port: params.lockPort,
             listenerMode: supervisorMode ? "supervised" : "foreground",
             supervisor,
+            // F2 (fork: Lane C): same mobile boot profile as the initial
+            // acquisition, so a restart iteration keeps the fast-path
+            // instead of silently falling back to the 300 s deadline.
+            mobileBoot: params.mobileBoot,
           });
         } catch (err) {
           if (forcedExitStarted) {

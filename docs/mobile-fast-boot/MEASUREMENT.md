@@ -47,21 +47,21 @@ Laporan riset (`~/workspace/research-start/per-harness/openclaw.md` §5)
 memakai nama dari `dist/` 2026.11.6. Tidak semua nama itu masih ada di
 `src/` saat ini; pemetaannya:
 
-| Nama di laporan riset | Nama trace saat ini (F9) | Keterangan |
-|---|---|---|
-| impor graf entry (~30 dtk) | `cli.main.gateway-run-import.*` (per chunk: commander, run-command, version, banner, runtime) + `gateway-run-imports` | F9: dipecah per chunk di `src/cli/run-main.ts` |
-| `gateway-run-bootstrap` (58,6 dtk) | `cli.main.gateway-run-bootstrap`, `cli.main.gateway-run-pre-bootstrap`, `cli.environment.*`, `cli.bootstrap.*` | Sudah ada upstream; F9 tidak menambah |
-| `gateway-lock` (18 dtk bersih) | `cli.bootstrap.gateway-lock` (CLI) + `gateway.lock-acquire` (server langsung) | F9: tambah langkah bootstrap `gateway.lock-acquire` di `src/gateway/server.ts`. Terukur [LAB]: 1,6–1,9 dtk (lihat §4.2) — 18 dtk lama adalah worst-case lock basi, bukan jalan bersih |
-| `state-snapshot` (10,8 dtk) | `cli.bootstrap.admission.state-snapshot` | **Koreksi:** langkah ini ADA — namanya dibangun dinamis `cli.bootstrap.${name}`, jadi pencarian literal `state-snapshot` di `src/` tidak menemukannya. Terukur [LAB]: 1,7–2,3 dtk (lihat §4.2) |
-| `plugin-config` (6,7 dtk) | `plugins.bootstrap.plan` → `plugins.bootstrap.activation-config` + `plugins.bootstrap.lookup-table` | F9: dipecah di `src/gateway/server-startup-plugins.ts`. Terukur [LAB]: 1,6–2,2 dtk (lihat §4.2) |
-| `database/session-runtime-import` (10,3 dtk) | `gateway.database-engine-install` + `gateway.sqlite-runtime-initialize` (langkah bootstrap) | F9: diukur di `src/gateway/server.ts` |
-| `gateway.server-start-import` (22,1 dtk) | `gateway.server-start-import` (langkah bootstrap, satu impor dinamis `./server-start.js`) | Graf statis di dalamnya TIDAK bisa dipecah tanpa restrukturisasi; diukur tidak langsung lewat fase-fase hilir (`gateway.kernel-state`, `gateway.request-runtime`, `gateway.http-transport`, …) |
-| `sessions.admission` (27,2 dtk) | `sessions.admission` → `sessions.admission.deletion-snapshot`, `.store-identity`, `.acp-keys`, `.legacy-main-keys`, `.targets` | F9: dipecah di `src/config/sessions/startup-migration.ts` (via `measure` injeksi) |
-| celah 221,1–304,2 dtk (~83 dtk) | `gateway.kernel-state` (+ sub-langkah `device-identity`, `device-pairing`, `worker-environments.*`, `runtime.config`, `control-ui.root`, `tls.runtime`, `runtime.state`, … — sudah ada upstream) + `gateway.http-transport` (F9) + `http.listen.*` (F9) | **Vonis §4.3: di LAB native TIDAK ada celah ~150 dtk tanpa fase.** Wilayah ini terurai menjadi fase-fase terukur; biaya terbesar pasca-bind adalah `plugins.runtime-post-bind` (~9,7 dtk) + `runtime.post-attach` (13,3 dtk total). Lihat §4.3 |
-| `http.listen` → `http.bound` | `gateway.ws-imports`, `gateway.ws-attach`, `http.listen` → `http.listen.tailscale-ingress`, `.bind`, `.portal-ingress`, `.sandbox-host`, `.plugin-listeners` | F9: `startListening` dipecah di `src/gateway/server-runtime-state.ts` |
-| `ensureRequestRuntimeReady` | `gateway.request-runtime` → `sessions.projection`, `gateway.owner-profile`, `sessions.materialize`, `sessions.first-page`, `gateway.lifetime-sidecars`, `gateway.instance-runtime-import` | Sudah ada upstream |
-| `runtime.early` | `runtime.early.discovery`, `.lazy-runtime-imports`, `.skills-listener` | Sudah ada upstream |
-| `plugins.runtime-post-bind` (67,7 dtk) | `plugins.runtime-post-bind` + `plugins.gateway-load.plugin.*` (per plugin) | Sudah ada upstream |
+| Nama di laporan riset                        | Nama trace saat ini (F9)                                                                                                                                                                                                                                | Keterangan                                                                                                                                                                                                                                     |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| impor graf entry (~30 dtk)                   | `cli.main.gateway-run-import.*` (per chunk: commander, run-command, version, banner, runtime) + `gateway-run-imports`                                                                                                                                   | F9: dipecah per chunk di `src/cli/run-main.ts`                                                                                                                                                                                                 |
+| `gateway-run-bootstrap` (58,6 dtk)           | `cli.main.gateway-run-bootstrap`, `cli.main.gateway-run-pre-bootstrap`, `cli.environment.*`, `cli.bootstrap.*`                                                                                                                                          | Sudah ada upstream; F9 tidak menambah                                                                                                                                                                                                          |
+| `gateway-lock` (18 dtk bersih)               | `cli.bootstrap.gateway-lock` (CLI) + `gateway.lock-acquire` (server langsung)                                                                                                                                                                           | F9: tambah langkah bootstrap `gateway.lock-acquire` di `src/gateway/server.ts`. Terukur [LAB]: 1,6–1,9 dtk (lihat §4.2) — 18 dtk lama adalah worst-case lock basi, bukan jalan bersih                                                          |
+| `state-snapshot` (10,8 dtk)                  | `cli.bootstrap.admission.state-snapshot`                                                                                                                                                                                                                | **Koreksi:** langkah ini ADA — namanya dibangun dinamis `cli.bootstrap.${name}`, jadi pencarian literal `state-snapshot` di `src/` tidak menemukannya. Terukur [LAB]: 1,7–2,3 dtk (lihat §4.2)                                                 |
+| `plugin-config` (6,7 dtk)                    | `plugins.bootstrap.plan` → `plugins.bootstrap.activation-config` + `plugins.bootstrap.lookup-table`                                                                                                                                                     | F9: dipecah di `src/gateway/server-startup-plugins.ts`. Terukur [LAB]: 1,6–2,2 dtk (lihat §4.2)                                                                                                                                                |
+| `database/session-runtime-import` (10,3 dtk) | `gateway.database-engine-install` + `gateway.sqlite-runtime-initialize` (langkah bootstrap)                                                                                                                                                             | F9: diukur di `src/gateway/server.ts`                                                                                                                                                                                                          |
+| `gateway.server-start-import` (22,1 dtk)     | `gateway.server-start-import` (langkah bootstrap, satu impor dinamis `./server-start.js`)                                                                                                                                                               | Graf statis di dalamnya TIDAK bisa dipecah tanpa restrukturisasi; diukur tidak langsung lewat fase-fase hilir (`gateway.kernel-state`, `gateway.request-runtime`, `gateway.http-transport`, …)                                                 |
+| `sessions.admission` (27,2 dtk)              | `sessions.admission` → `sessions.admission.deletion-snapshot`, `.store-identity`, `.acp-keys`, `.legacy-main-keys`, `.targets`                                                                                                                          | F9: dipecah di `src/config/sessions/startup-migration.ts` (via `measure` injeksi)                                                                                                                                                              |
+| celah 221,1–304,2 dtk (~83 dtk)              | `gateway.kernel-state` (+ sub-langkah `device-identity`, `device-pairing`, `worker-environments.*`, `runtime.config`, `control-ui.root`, `tls.runtime`, `runtime.state`, … — sudah ada upstream) + `gateway.http-transport` (F9) + `http.listen.*` (F9) | **Vonis §4.3: di LAB native TIDAK ada celah ~150 dtk tanpa fase.** Wilayah ini terurai menjadi fase-fase terukur; biaya terbesar pasca-bind adalah `plugins.runtime-post-bind` (~9,7 dtk) + `runtime.post-attach` (13,3 dtk total). Lihat §4.3 |
+| `http.listen` → `http.bound`                 | `gateway.ws-imports`, `gateway.ws-attach`, `http.listen` → `http.listen.tailscale-ingress`, `.bind`, `.portal-ingress`, `.sandbox-host`, `.plugin-listeners`                                                                                            | F9: `startListening` dipecah di `src/gateway/server-runtime-state.ts`                                                                                                                                                                          |
+| `ensureRequestRuntimeReady`                  | `gateway.request-runtime` → `sessions.projection`, `gateway.owner-profile`, `sessions.materialize`, `sessions.first-page`, `gateway.lifetime-sidecars`, `gateway.instance-runtime-import`                                                               | Sudah ada upstream                                                                                                                                                                                                                             |
+| `runtime.early`                              | `runtime.early.discovery`, `.lazy-runtime-imports`, `.skills-listener`                                                                                                                                                                                  | Sudah ada upstream                                                                                                                                                                                                                             |
+| `plugins.runtime-post-bind` (67,7 dtk)       | `plugins.runtime-post-bind` + `plugins.gateway-load.plugin.*` (per plugin)                                                                                                                                                                              | Sudah ada upstream                                                                                                                                                                                                                             |
 
 ## 4. Hasil baseline — upstream 2026.11.6, saklar OFF [LAB]
 
@@ -80,11 +80,11 @@ artefak itu dan sebagai pembanding.
 
 ### 4.1 Definisi A + B (proksi) + `/ready`
 
-| Run | `OPENCLAW_MOBILE_BOOT` | `/health` 200 pertama (A) | `/ready` 200 pertama | `/` 200 pertama (proksi B) |
-|---|---|---|---|---|
-| run1-off | OFF (kosong) | 21,8 dtk | 43,5 dtk | **191,6 dtk** (artefak: build UI on-demand 168,1 dtk) |
-| run2-off | OFF (kosong) | 26,1 dtk | 42,4 dtk | **42,6 dtk** |
-| run1-on | `=1` (lihat §5) | 18,9 dtk | 32,8 dtk | 32,9 dtk |
+| Run      | `OPENCLAW_MOBILE_BOOT` | `/health` 200 pertama (A) | `/ready` 200 pertama | `/` 200 pertama (proksi B)                            |
+| -------- | ---------------------- | ------------------------- | -------------------- | ----------------------------------------------------- |
+| run1-off | OFF (kosong)           | 21,8 dtk                  | 43,5 dtk             | **191,6 dtk** (artefak: build UI on-demand 168,1 dtk) |
+| run2-off | OFF (kosong)           | 26,1 dtk                  | 42,4 dtk             | **42,6 dtk**                                          |
+| run1-on  | `=1` (lihat §5)        | 18,9 dtk                  | 32,8 dtk             | 32,9 dtk                                              |
 
 Variansi antar-run OFF: health 21,8 ↔ 26,1 dtk (±4 dtk); ready 42,4 ↔
 43,5 dtk (±1 dtk). Penyebab variansi: kontensi CPU dari lane paralel
@@ -94,26 +94,26 @@ yang jalan bersamaan + cache hangat — bukan saklar (lihat §5).
 
 Garis waktu (total akhir tiap fase):
 
-| Rentang (dtk) | Fase / peristiwa | Durasi |
-|---|---|---|
-| 0,0–0,8 | `entry.bootstrap` → `entry.argv` → `entry.run-main-import` | 0,19 dtk |
-| 0,8–2,8 | **celah kecil tanpa fase ~2,0 dtk** (prewarm/impor dinamis sebelum `cli.main.argv`) — sisa wilayah tak terukur, lihat §4.3 | ~2,0 dtk |
-| 2,8–5,1 | `cli.main.database-engine-selection` | ~2,3 dtk (mayoritas menunggu, durasi langkah 0,9 ms) |
-| 5,1–5,9 | `gateway-run-select-environment` (`config-import` 0,72 dtk, `config-guard` 0,81 dtk) | 0,84 dtk |
-| 5,9–13,2 | `gateway-run-bootstrap` / `config-ready`: `database-readiness` 0,98 dtk, `plugin-config` 1,65 dtk, `state-snapshot` 1,72 dtk, `webhook-readiness` 1,93 dtk | 6,85 dtk |
-| 13,2–16,2 | `gateway-lock` | 1,61 dtk |
-| 16,2–18,9 | `gateway.server-start-import` (satu impor dinamis `./server-start.js`) | 1,94 dtk |
-| 18,9–19,8 | `state.ownership` | 0,90 dtk |
-| 19,8–22,3 | `sessions.admission` (`deletion-snapshot` 1,54 dtk) | 1,62 dtk |
-| 22,3–23,7 | `plugins.bootstrap` (`subagent-registry` 1,43 dtk) | 1,46 dtk |
-| 23,7–26,0 | `gateway.kernel-state` 0,98 dtk, `request-runtime` 0,25 dtk, `http-transport`, `http.listen` → **`http.bound` 26,0 dtk → `/health` 200 @ 26,1 dtk (A)** | ~2,3 dtk |
-| 26,0–27,7 | `sessions.projection` | 1,86 dtk |
-| 27,7–27,9 | `sidecars.control-ui-assets` (aset prebuilt: **0,5 ms**; bandingkan run1-off: 168.059 ms) | 0,0005 dtk |
-| 27,9–37,6 | **`plugins.runtime-post-bind`** — fase tunggal terbesar | **9,70 dtk** |
-| 37,6–41,2 | `sidecars.reply-runtime` 1,53 dtk, `sidecars.model-runtime` 2,71 dtk → `runtime.post-attach` selesai 41,2 dtk (total 13,29 dtk) | ~3,6 dtk |
-| 41,2–42,3 | fase `ready` → **`/ready` 200 @ 42,4 dtk** | 0,41 dtk |
-| 42,4–42,6 | **`GET /` 200 @ 42,6 dtk (proksi B)** — 0,2 dtk sesudah `/ready` | — |
-| 42,3–48,4 | `post-ready.maintenance` 4,80 dtk + `post-ready.gateway-data.memory-search` 2,53 dtk (latar, sesudah ready — tidak memblokir B) | — |
+| Rentang (dtk) | Fase / peristiwa                                                                                                                                           | Durasi                                               |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 0,0–0,8       | `entry.bootstrap` → `entry.argv` → `entry.run-main-import`                                                                                                 | 0,19 dtk                                             |
+| 0,8–2,8       | **celah kecil tanpa fase ~2,0 dtk** (prewarm/impor dinamis sebelum `cli.main.argv`) — sisa wilayah tak terukur, lihat §4.3                                 | ~2,0 dtk                                             |
+| 2,8–5,1       | `cli.main.database-engine-selection`                                                                                                                       | ~2,3 dtk (mayoritas menunggu, durasi langkah 0,9 ms) |
+| 5,1–5,9       | `gateway-run-select-environment` (`config-import` 0,72 dtk, `config-guard` 0,81 dtk)                                                                       | 0,84 dtk                                             |
+| 5,9–13,2      | `gateway-run-bootstrap` / `config-ready`: `database-readiness` 0,98 dtk, `plugin-config` 1,65 dtk, `state-snapshot` 1,72 dtk, `webhook-readiness` 1,93 dtk | 6,85 dtk                                             |
+| 13,2–16,2     | `gateway-lock`                                                                                                                                             | 1,61 dtk                                             |
+| 16,2–18,9     | `gateway.server-start-import` (satu impor dinamis `./server-start.js`)                                                                                     | 1,94 dtk                                             |
+| 18,9–19,8     | `state.ownership`                                                                                                                                          | 0,90 dtk                                             |
+| 19,8–22,3     | `sessions.admission` (`deletion-snapshot` 1,54 dtk)                                                                                                        | 1,62 dtk                                             |
+| 22,3–23,7     | `plugins.bootstrap` (`subagent-registry` 1,43 dtk)                                                                                                         | 1,46 dtk                                             |
+| 23,7–26,0     | `gateway.kernel-state` 0,98 dtk, `request-runtime` 0,25 dtk, `http-transport`, `http.listen` → **`http.bound` 26,0 dtk → `/health` 200 @ 26,1 dtk (A)**    | ~2,3 dtk                                             |
+| 26,0–27,7     | `sessions.projection`                                                                                                                                      | 1,86 dtk                                             |
+| 27,7–27,9     | `sidecars.control-ui-assets` (aset prebuilt: **0,5 ms**; bandingkan run1-off: 168.059 ms)                                                                  | 0,0005 dtk                                           |
+| 27,9–37,6     | **`plugins.runtime-post-bind`** — fase tunggal terbesar                                                                                                    | **9,70 dtk**                                         |
+| 37,6–41,2     | `sidecars.reply-runtime` 1,53 dtk, `sidecars.model-runtime` 2,71 dtk → `runtime.post-attach` selesai 41,2 dtk (total 13,29 dtk)                            | ~3,6 dtk                                             |
+| 41,2–42,3     | fase `ready` → **`/ready` 200 @ 42,4 dtk**                                                                                                                 | 0,41 dtk                                             |
+| 42,4–42,6     | **`GET /` 200 @ 42,6 dtk (proksi B)** — 0,2 dtk sesudah `/ready`                                                                                           | —                                                    |
+| 42,3–48,4     | `post-ready.maintenance` 4,80 dtk + `post-ready.gateway-data.memory-search` 2,53 dtk (latar, sesudah ready — tidak memblokir B)                            | —                                                    |
 
 Perbandingan run1-off (OFF, artefak build UI) untuk fase yang sama:
 `server-start-import` 2,26 dtk; `state-snapshot` 2,30 dtk;
@@ -159,6 +159,7 @@ kesimpulan:
    inflasi emulasi + stall katalog, bukan dari celah ini.
 
 **Sisa wilayah tak terukur (kecil, dicatat jujur):**
+
 - Celah ~0,8–2,0 dtk antara akhir `entry.run-main-import` dan awal
   `cli.main.argv` (prewarm / impor dinamis entry; bervariasi per run:
   1,1 dtk di run1-off, 2,0 dtk di run2-off, 1,2 dtk di run1-on).
@@ -175,11 +176,11 @@ kesimpulan:
 Run `run1-on` (`OPENCLAW_MOBILE_BOOT=1`, aset prebuilt, 24 Nov 2026
 21:50 WIB):
 
-| | `/health` 200 (A) | `/ready` 200 | `/` 200 (proksi B) |
-|---|---|---|---|
-| OFF run1-off (artefak build UI) | 21,8 dtk | 43,5 dtk | 191,6 dtk |
-| OFF run2-off (valid) | 26,1 dtk | 42,4 dtk | 42,6 dtk |
-| **ON run1-on** | **18,9 dtk** | **32,8 dtk** | **32,9 dtk** |
+|                                 | `/health` 200 (A) | `/ready` 200 | `/` 200 (proksi B) |
+| ------------------------------- | ----------------- | ------------ | ------------------ |
+| OFF run1-off (artefak build UI) | 21,8 dtk          | 43,5 dtk     | 191,6 dtk          |
+| OFF run2-off (valid)            | 26,1 dtk          | 42,4 dtk     | 42,6 dtk           |
+| **ON run1-on**                  | **18,9 dtk**      | **32,8 dtk** | **32,9 dtk**       |
 
 - Baris log A1 muncul di `run1-on/gateway.log:142`:
   `mobile boot profile enabled (OPENCLAW_MOBILE_BOOT=1); fork fast-boot
@@ -215,3 +216,107 @@ Run `run1-on` (`OPENCLAW_MOBILE_BOOT=1`, aset prebuilt, 24 Nov 2026
    variansi antar-run terukur: `/health` OFF 21,8 ↔ 26,1 dtk. Lane
    berikutnya yang membandingkan fork vs upstream tetap harus mengulang
    minimal 2× per kondisi dalam kondisi CPU yang sama.
+
+## 7. F2 — fast-path gateway-lock single-owner mobile (Lane C)
+
+### 7.1 Bukti unit/integration (bukan LAB boot — lolos penuh)
+
+Perilaku F2 dibuktikan pada berkas persis (filesystem + proses nyata,
+bukan mock lock): `src/infra/gateway-lock.single-owner.test.ts`
+(5 test) + regresi lock upstream + `src/gateway/mobile-boot.test.ts`.
+Jalankan: `node scripts/run-vitest.mjs run --config
+test/vitest/vitest.infra.config.ts <berkas>` (regresi) dan
+`--config /tmp/vitest-f2.config.mts` (single-owner, dari cwd mana pun —
+holder child di-`cwd`-kan ke root worktree).
+**Verifikasi ulang Lane C #2 (25 Nov 2026 ~02:46–03:00 WIB): semua angka
+di bawah direproduksi dari nol sesudah restart VM** — kecuali
+`run-vitest.mjs` yang dibunuh runner-nya sendiri sesudah 120 dtk tanpa
+output (cache vitest dingin pasca-restart), jadi test dijalankan lewat
+`./node_modules/.bin/vitest run` langsung dengan perintah yang sama.
+
+| Test                                                                                                                                                                                         | Hasil [LAB]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OFF (upstream): stale owner namespace `"unknown"` + PID mati TIDAK pernah direklamasi                                                                                                        | ✅ lolos (324 ms) — berkas byte-identik sesudahnya                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ON: stale owner yang sama direklamasi LANGSUNG, tanpa membuat proyeksi `gateway.state.lock`                                                                                                  | ✅ lolos (175 ms) — owner file kini milik PID kami; state tetap bisa dipakai ulang upstream                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ON: TIDAK PERNAH mereklamasi owner HIDUP, sesingkat apa pun deadline                                                                                                                         | ✅ lolos (201 ms)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ON: tunggu owner hidup dibatasi TEPAT 30 dtk (jam palsu) — upstream 300 dtk                                                                                                                  | ✅ lolos (1.006 ms) — pesan `"failed to acquire gateway state ownership; waited 30000ms …"` + `elapsedMs === 30_000`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| N2: proses kedua dengan env menyala exit `GatewayLockError` pada bind TCP eksklusif                                                                                                          | ✅ lolos (18,2 dtk; klaim Lane C #1: 11,6 dtk — variansi beban VM) — `GATEWAY_LOCK_ERROR` + `already listening`; proses pertama tetap melayani 200; owner mati proses kedua tetap bisa direklamasi upstream                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Regresi lock upstream (`gateway-lock`, `gateway-state-owner`, `gateway-lock.namespace`, `gateway-lock.hostname`, `gateway-lock-legacy`, `gateway-owner-lease`, `gateway-lock.write-failure`) | ✅ 163 lolos + 1 dilewati (7 berkas, 492,6 dtk)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `mobile-boot` (resolver A1+F2: lone `SINGLE_OWNER` tanpa A1 tidak berpengaruh)                                                                                                               | ✅ 24/24 lolos (6,3 dtk)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Typecheck tsgo                                                                                                                                                                               | ✅ `tsgo:core` exit 0 + shard test `gateway-root`, `infra`, `agents-root`, `agents-other` masing-masing exit 0 (dijalankan langsung per config `test/tsconfig/tsconfig.core.test.<shard>.json` — runner `run-tsgo-core-test-shards.mjs` menerima grup, bukan nama shard; lihat §7.4)                                                                                                                                                                                                                                                                                                                                                                     |
+| Lint/format                                                                                                                                                                                  | ✅ oxlint langsung 0 warning + 0 error (10 berkas tersentuh, 14,7 dtk) + oxfmt bersih (12 berkas tersentuh, `git diff --check` OK). Catatan: wrapper `scripts/run-oxlint.mjs` GAGAL dua kali bukan karena temuan lint — (a) `file lock stale` pada `.artifacts/dist-artifacts.lock/owner.json` (pemilik PID 6831 mati saat restart VM; direktori lock yang diabaikan git itu dihapus, pemilik terverifikasi mati via `kill -0`); (b) langkah persiapan `plugin-sdk boundary dts` timeout 300 dtk di bawah beban VM. Lint atas berkas F2 sendiri dibuktikan lewat oxlint langsung dengan `-c .oxlintrc.json --tsconfig config/tsconfig/oxlint.core.json`. |
+
+Catatan koreksi selama verifikasi: typecheck menemukan 1 error tipe
+nyata (`seedStaleOwner`: `env.OPENCLAW_STATE_DIR` bertipe `string |
+undefined`, diperbaiki dengan guard eksplisit); lint menemukan 4
+error (`fsSync` tak terpakai, 2× return di executor Promise,
+`gateway-lock.ts` 703 baris > batas 700 — dipadatkan komentar +
+`log.warn` + ekstraksi `gatewayTimeoutMs`).
+
+### 7.2 Status build `dist/` (prasyarat ukur boot)
+
+- **Preflight tsdown menolak build penuh tanpa override:**
+  `The resolved OpenClaw build heap is 2121MB, and a full build needs
+  4352MB, peaking near 4.7GB` (heap dihitung dari limit cgroup 6 GB
+  sel ini). Override yang disediakan tool
+  (`OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB=4352`) dipakai untuk mencoba.
+- **Percobaan 1 (25 Nov 2026 ~01:40–01:58 WIB): GAGAL — OOM-kill
+  kernel (SIGKILL, exit 137) pada invocation 2/2 sesudah 975,9 dtk.**
+  Worker tsdown mencapai ~4 GB RSS (51,5% RAM VM) sementara RAM bebas
+  VM jatuh ke 159 MB (lane lain berjalan paralel). `dist/` hanya berisi
+  84 berkas / 752 KB dari invocation 1 (katalog ekstensi + worker
+  kecil) — **bundle utama gateway (chunk `.mjs`) TIDAK ADA**, jadi
+  gateway belum bisa di-boot dari `dist/` ini. `node openclaw.mjs
+  --version` mencetak `OpenClaw 2026.11.6 (1d9ecf4)` — itu TIDAK
+  membuktikan bundle ada (versi tidak memuat `dist/`).
+- Cache build (`.artifacts/build-all-cache/`) kosong — tidak ada yang
+  bisa di-restore; worktree Lane A (sumber `dist/` rujukan) sudah
+  dihapus. Swap tambahan tidak bisa dibuat (kuota disk: `fallocate`
+  1–4 GB gagal `Disk quota exceeded`, tulis 100 MB lolos).
+- **Percobaan ulang dijadwalkan sesudah jendela sepi VM** (tidak ada
+  lane lain yang sedang build). Bila tetap gagal, bagian ini dicatat
+  jujur sebagai pemblokir (lihat §7.4).
+- **Percobaan 2 (25 Nov 2026 ~03:26–03:39 WIB): BERHASIL —
+  `pnpm build:runtime` exit 0, total 12 m 6,1 dtk** (tsdown 4 m 15,6 dtk;
+  `ui:build` 2 m 53,1 dtk; `external-plugins:local-dist` 1 m 7 dtk).
+  Kondisi yang membedakan dari Percobaan 1: VM sepi (tidak ada lane
+  lain yang sedang build; load ~2,3), RAM tersedia ~3,7 GB di awal,
+  worker tsdown memuncak ~3,5 GB RSS. Cache
+  (`.artifacts/build-all-cache/`) tetap berisi 16 direktori KOSONG dari
+  Percobaan 1 — tidak ada yang di-restore; build ini penuh dari nol.
+  `dist/` kini 497 MB / 8.996 entri termasuk chunk `.mjs` utama, dan
+  `node openclaw.mjs --version` mencetak `OpenClaw 2026.11.6 (1d9ecf4)`
+  dari `dist/` yang nyata. `dist/` ini di-build dari working tree
+  pra-commit yang isinya identik dengan commit F2 (status git bersih
+  sesudah commit; hanya stempel versi build-info yang menunjuk
+  `1d9ecf4`).
+
+### 7.3 Ukur boot LAB — bersih + kotor, ON vs OFF (2× per kondisi)
+
+**[BELUM DIUKUR — menunggu `dist/` hasil build.]** Metode (siap):
+bersih via `docs/mobile-fast-boot/measure-baseline.sh`
+(`run1-f2-off`, `run2-f2-off`, `run1-f2-on`, `run2-f2-on`); kotor via
+`docs/mobile-fast-boot/measure-lock-dirty.sh`
+(`dirty1-f2-off`, `dirty2-f2-off`, `dirty1-f2-on`, `dirty2-f2-on` —
+fase 1 boot bersih → `kill -9` → patch `processNamespace` ke asing
+(D-12) → boot ulang). Ekspektasi: bersih ON ≈ bersih OFF (lock 1,6
+dtk, hemat kecil); kotor OFF → exit `GatewayLockError` ~95 dtk tanpa
+`/health`; kotor ON → `/health` 200 ~waktu boot bersih. Artefak:
+`/tmp/lane-c-lab/<label>/`.
+
+### 7.4 Yang belum terbukti / pemblokir
+
+1. **Angka boot LAB F2 (clean + dirty, ON vs OFF, 2×)** — menunggu
+   `dist/` (lihat §7.2). Ekspektasi di §7.3 BUKAN hasil ukur.
+2. **Shard tsgo `agents-tools` dst. (di luar `gateway-root`,
+   `infra`, `agents-root`, `agents-other`)** — tidak dijalankan (di
+   luar cakupan perubahan). **Diverifikasi Lane C #2:** keempat shard
+   di atas masing-masing exit 0 (dijalankan langsung per config);
+   `tsgo:core` lolos untuk semua `src/`; semua perubahan signature
+   bersifat aditif/opsional; grep membuktikan tidak ada berkas test
+   lain yang mengonstruksi `MobileBootOptions` literal (hanya
+   `mobile-boot.ts`/`mobile-boot.test.ts` + test F2 sendiri; semua
+   pemakaian lain hanya threading `mobileBoot?:` opsional) — jadi
+   shard tersisa tidak dapat gagal oleh perubahan ini.
+3. **Vonis perangkat (S1/S2/S3)** — tetap menunggu seperti sebelumnya;
+   angka LAB bukan angka perangkat.
