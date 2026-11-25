@@ -1,6 +1,6 @@
 # LAPORAN — Rombak Arsitektur OpenClaw: Mobile Fast Boot (Fork)
 
-> **Status:** INTEGRASI SELESAI (5 lane: B/C/D/E/F merge ke `mobile-fast-boot` `7e0fe28d` + `b07d3587`, 25 Nov 2026); Lane G TERBLOKIR pemberitahuan keamanan (menunggu keputusan Lead/pemilik); build `dist/` terintegrasi + ukur LAB terintegrasi menunggu jendela sepi VM (waiter berjalan).
+> **Status:** INTEGRASI SELESAI (5 lane: B/C/D/E/F merge ke `mobile-fast-boot` `7e0fe28d` + `b07d3587`, 25 Nov 2026); Lane G TERBLOKIR pemberitahuan keamanan (menunggu keputusan Lead/pemilik); build `dist/` terintegrasi + ukur LAB terintegrasi TERBLOKIR — waiter timeout sesudah 180 cek (VM tidak bisa membuka jendela 5.500 MB); butuh mesin/CI ber-heap ≥4,4 GB.
 > **Basis:** `openclaw/openclaw` @ tag `v2026.11.6` (commit `06afb10d3272cc9deaf38ca6a3b7b839d5935638`).
 > **Repo fork lokal:** `~/workspace/openclaw-fork/` (remote `ngabzar05/openclaw` BELUM ada — fork 403, butuh admin org; pemilik yang buat).
 > **Target:** definisi B — "Buka → bisa dipakai dalam hitungan detik"; definisi A sedekat mungkin. Lantai gateway puluhan detik tetap berlaku.
@@ -141,9 +141,17 @@ bukan tmpfs). Kesimpulan: memori itu dipegang DI LUAR cell ini (host runtime
 dalam VM (drop_caches pun hanya membebaskan ~0,9 GB). Jendela 5.500 MB
 bergantung pada host, bukan pada pekerjaan di VM ini. Loop tunggu 60 mnt
 (11:49–12:49 WIB) habis tanpa jendela (cek waiter 59–61: 674/665/654 MB; load
-0,03 — sistem menganggur tapi memori tetap penuh). Waiter (generasi ke-2)
-berjalan sejak 13:50 WIB (pid 2050); timeout ~16:50 WIB bila jendela tidak
-terbuka.
+0,03 — sistem menganggur tapi memori tetap penuh). **Waiter (generasi ke-3)
+TIMEOUT 16:50 WIB sesudah 180 cek penuh (13:50–16:50 WIB) tanpa jendela
+terbuka sekalipun (cek 179–180: 611/558 MB). Total polling lintas 3 generasi
+waiter: 345 cek (~5 jam 45 mnt), maksimum 1,8 GB, jendela 5.500 MB tidak
+pernah terbuka. VONIS: build `dist/` terintegrasi TIDAK bisa dilakukan di VM
+ini; ukur LAB terintegrasi (ON vs OFF + WebUI bisa-dipakai) butuh mesin/CI
+ber-heap ≥4,4 GB (MemAvailable ≥5.500 MB selama ±12 mnt). Skrip waiter
+(`~/workspace/integration-build-waiter.sh`) tersimpan dan bisa di-restart
+dengan satu perintah bila host membebaskan memori; `pnpm install
+--frozen-lockfile` di repo utama sudah selesai (node_modules 109 entri),
+jadi yang tersisa hanya `pnpm build:runtime` + ukur.
 
 _Catatan zona waktu: jam sistem VM adalah UTC; semua waktu di laporan ini
 WIB (UTC+7). Label waktu pada catatan §4.3 sebelum revisi ini sebenarnya
@@ -165,4 +173,4 @@ isi tabel di bawah ini.
 2. **Remote `ngabzar05/openclaw`** — fork via web GitHub ke org `ngabzar05` (403, akun `azqifaiq02` bukan admin org), atau repo kosong + push.
 3. **Integrasi ke Polones** (langkah terpisah sesudah verifikasi): re-pin `scripts/openclaw/build.sh` + `release-pin.sha256` + test kontrak hash ke artefak fork.
 4. **Prestart ON + warm-run 7.5** (keputusan pemilik terpisah — satu-satunya jalan ke "terasa instan" tanpa fork).
-5. **Mesin build ber-heap besar (bila VM ini tidak cukup):** build `dist/` butuh heap 4.352 MB + MemAvailable ≥5.500 MB selama ±12 mnt. Bila jendela sepi VM tidak pernah terbuka, ukur LAB terintegrasi + per-lane (B/D/E/F/G) butuh mesin/CI dengan heap ≥4,4 GB. Vonis perangkat (S1/S2/S3) tetap menunggu pemilik.
+5. **Mesin build ber-heap besar — DIPUTUSKAN PERLU (bukan lagi "bila"):** VM ini TIDAK cukup (waiter timeout sesudah 180 cek penuh, §4.3; maksimum MemAvailable 1,8 GB vs kebutuhan ≥5.500 MB). Ukur LAB terintegrasi + per-lane (B/D/E/F/G) butuh mesin/CI dengan heap ≥4,4 GB. Vonis perangkat (S1/S2/S3) tetap menunggu pemilik.
