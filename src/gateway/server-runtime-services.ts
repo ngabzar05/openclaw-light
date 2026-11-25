@@ -28,6 +28,7 @@ import { startSessionUpstreamMonitor } from "../sessions/session-upstream-monito
 import { runInDetachedAsyncContext } from "../shared/detached-async-context.js";
 import { captureOpenClawStateWorkerContext } from "../state/openclaw-state-worker-context.js";
 import { withAuthorizedQueuedConversationDelivery } from "./conversation-route-ownership.js";
+import type { DeferredSessionMigration } from "./deferred-session-migration.js";
 import {
   createScheduledGatewayRunner,
   fenceScheduledGatewayContextResolver,
@@ -53,7 +54,27 @@ type GatewayStartupMaintenance = {
   pluginRuntime: { registry: ReturnType<StartupMaintenanceParams["getPluginRegistry"]> };
   pluginMetadataSnapshot?: StartupMaintenanceParams["pluginMetadataSnapshot"];
   startupTrace?: StartupMaintenanceParams["startupTrace"];
+  /**
+   * F1: when the mobile profile deferred the fleet-wide migration, the
+   * databases above start empty and the real list arrives on this
+   * promise. Consumers below await it before touching the databases, so
+   * post-ready maintenance never silently runs against an empty list.
+   */
+  deferredSessionMigration?: Pick<DeferredSessionMigration, "ready">;
 };
+
+/**
+ * Resolve the admitted startup databases, awaiting a deferred F1
+ * migration when one exists. By the time post-ready maintenance runs,
+ * the migration has already settled (finish awaits it before ready), so
+ * this is a correctness backstop, not a delay.
+ */
+async function resolveStartupSessionDatabases(
+  maintenance: GatewayStartupMaintenance,
+): Promise<StartupMaintenanceParams["databases"]> {
+  const deferred = maintenance.deferredSessionMigration;
+  return deferred ? await deferred.ready : maintenance.startupSessionDatabases;
+}
 type GatewayPostReadyLogger = StartupMaintenanceParams["log"];
 
 /** Starts cron without making the surrounding startup or reload transaction wait. */
@@ -135,7 +156,7 @@ export function scheduleGatewayPostReadyMaintenance(params: {
           const { warmGatewayDatabasePageCache } = await import("./server-database-page-cache.js");
           signal.throwIfAborted();
           await warmGatewayDatabasePageCache({
-            databases: params.startupMaintenance.startupSessionDatabases,
+            databases: await resolveStartupSessionDatabases(params.startupMaintenance),
             signal,
             startupTrace: params.startupMaintenance.startupTrace,
             log: params.log,
@@ -164,7 +185,7 @@ export function scheduleGatewayPostReadyMaintenance(params: {
             getConfig: getRuntimeConfig,
             getPluginRegistry: () => params.startupMaintenance.pluginRuntime.registry,
             pluginMetadataSnapshot: params.startupMaintenance.pluginMetadataSnapshot,
-            databases: params.startupMaintenance.startupSessionDatabases,
+            databases: await resolveStartupSessionDatabases(params.startupMaintenance),
             startupTrace: params.startupMaintenance.startupTrace,
             signal,
             log: params.log,

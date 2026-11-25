@@ -13,6 +13,7 @@ import type { OpenClawAgentDatabaseOptions } from "../state/openclaw-agent-db-co
 import { resolveOpenClawAgentSqlitePath } from "../state/openclaw-agent-db.paths.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { captureOpenClawStateReadContext } from "../state/openclaw-state-worker-context.js";
+import type { MobileBootOptions } from "./mobile-boot.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
 
 export type PreparedStartupSessionDatabase = {
@@ -27,6 +28,12 @@ export async function prepareGatewayStartupSessions(params: {
   agentIds?: ReadonlySet<string>;
   assertCurrent?: () => void;
   log: SessionStartupMigrationLogger;
+  /**
+   * Mobile boot profile (fork: A1/F1/A4). When enabled, the migration
+   * runs incrementally (A4 watermark); when absent/disabled, every target
+   * is migrated fully, exactly like upstream (guardrail N10).
+   */
+  mobileBoot?: MobileBootOptions;
   /**
    * F9 startup-trace measurement, injected by the gateway bootstrap.
    * Passed straight through to `runSessionStartupMigration` (log-only).
