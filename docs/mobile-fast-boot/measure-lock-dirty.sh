@@ -31,6 +31,10 @@ TIMEOUT_S="${3:-300}"
 if [ "$MODE" != "off" ] && [ "$MODE" != "on" ]; then
   echo "FATAL: mode harus off|on" >&2; exit 2
 fi
+# (Perbaikan Lane C #2: mkdir HARUS sebelum flock — sesudah restart VM
+# /tmp kosong dan redirect lock gagal sebelum mkdir tercapai.)
+mkdir -p /tmp/lane-c-lab
+chmod 700 /tmp/lane-c-lab
 exec 9>"/tmp/lane-c-lab/.measure-dirty-$LABEL.lock"
 if ! flock -n 9; then
   echo "FATAL: run berlabel $LABEL lain masih jalan" >&2; exit 4

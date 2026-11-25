@@ -293,21 +293,68 @@ error (`fsSync` tak terpakai, 2× return di executor Promise,
 
 ### 7.3 Ukur boot LAB — bersih + kotor, ON vs OFF (2× per kondisi)
 
-**[BELUM DIUKUR — menunggu `dist/` hasil build.]** Metode (siap):
-bersih via `docs/mobile-fast-boot/measure-baseline.sh`
-(`run1-f2-off`, `run2-f2-off`, `run1-f2-on`, `run2-f2-on`); kotor via
-`docs/mobile-fast-boot/measure-lock-dirty.sh`
-(`dirty1-f2-off`, `dirty2-f2-off`, `dirty1-f2-on`, `dirty2-f2-on` —
-fase 1 boot bersih → `kill -9` → patch `processNamespace` ke asing
-(D-12) → boot ulang). Ekspektasi: bersih ON ≈ bersih OFF (lock 1,6
-dtk, hemat kecil); kotor OFF → exit `GatewayLockError` ~95 dtk tanpa
-`/health`; kotor ON → `/health` 200 ~waktu boot bersih. Artefak:
-`/tmp/lane-c-lab/<label>/`.
+**TERUKUR 25 Nov 2026 ~03:41–03:54 WIB** (sesudah build Percobaan 2
+berhasil; `dist/` commit `bbef1646`). Metode: bersih via
+`docs/mobile-fast-boot/measure-baseline.sh` (`run1-f2-off`,
+`run2-f2-off`, `run1-f2-on`, `run2-f2-on`); kotor via
+`docs/mobile-fast-boot/measure-lock-dirty.sh` (`dirty1-f2-off`,
+`dirty2-f2-off`, `dirty1-f2-on`, `dirty2-f2-on` — fase 1 boot bersih →
+`kill -9` → patch `processNamespace` ke asing (D-12) → boot ulang).
+Artefak: `/tmp/lane-a-lab/<label>/` (bersih),
+`/tmp/lane-c-lab/<label>/` (kotor); salinan di
+`~/workspace/lane-c-lab/<label>/` (selamat dari restart VM).
+**Koreksi skrip selama ukur:** kedua skrip membuka flock SEBELUM
+`mkdir -p` direktori lab — sesudah restart VM `/tmp` kosong dan semua
+run gagal instan (exit 4). Diperbaiki: `mkdir -p` + `chmod 700`
+dipindah ke sebelum `exec 9>` (10 baris, 2 berkas).
+
+| Kondisi    | Run           | `/health` 200 pertama (A)         | `/ready` 200 | `/` 200 (proksi B) | `cli.bootstrap.gateway-lock` |
+| ---------- | ------------- | --------------------------------- | ------------ | ------------------ | ---------------------------- |
+| Bersih OFF | run1-f2-off   | 21,419 dtk                        | 37,162 dtk   | 37,391 dtk         | 1.978 ms                     |
+| Bersih OFF | run2-f2-off   | 21,333 dtk                        | 36,397 dtk   | 36,589 dtk         | 1.492 ms                     |
+| Bersih ON  | run1-f2-on    | 25,766 dtk                        | 40,994 dtk   | 41,314 dtk         | 962 ms                       |
+| Bersih ON  | run2-f2-on    | 22,037 dtk                        | 36,880 dtk   | 37,301 dtk         | 979 ms                       |
+| Kotor OFF  | dirty1-f2-off | — (exit 104,616 dtk, exit_code=1) | —            | —                  | 2.059 ms*                    |
+| Kotor OFF  | dirty2-f2-off | — (exit 104,468 dtk, exit_code=1) | —            | —                  | 1.627 ms*                    |
+| Kotor ON   | dirty1-f2-on  | 21,423 dtk                        | n/a†         | n/a†               | 1.612 ms                     |
+| Kotor ON   | dirty2-f2-on  | 22,867 dtk                        | n/a†         | n/a†               | 1.896 ms                     |
+
+\* Durasi langkah lock saja — kegagalan OFF terjadi sesudahnya, pada
+tunggu heartbeat 95 dtk (pesan: `Waiting up to 95 seconds for the
+previous Gateway to release state; an unverifiable owner will not be
+reclaimed automatically`, lalu `Gateway failed to start: cannot verify
+Gateway ownership … holder <pid> at foreign-host/pid-ns 999999999,
+last renewed 103 s ago`).
+† Skrip kotor hanya mem-poll `/health` di fase 3 (lalu berhenti 20 dtk
+sesudahnya); `/ready` dan `/` tidak diukur di run kotor.
+
+**Vonis F2 [LAB]:**
+
+1. **Bersih: ON ≈ OFF dalam batas noise.** `/health` ON 22,0–25,8 dtk
+   vs OFF 21,3–21,4 dtk; `/ready` dan `/` sama polanya. Run1-on
+   (+4,3 dtk vs OFF) adalah variansi antar-run (OFF sendiri bervariasi
+   ±4 dtk di §4.1; run2-on 22,0 dtk ≈ run2-off 21,3 dtk). Sesuai
+   ekspektasi: lock bersih hanya ~1,5–2,0 dtk dari ~21 dtk boot, dan
+   F2 memangkas langkah lock itu dari ~1.978/1.492 ms menjadi
+   ~962/979 ms (~0,5–1,0 dtk hemat) — kecil dan tertelan noise.
+2. **Kotor: ON menyelamatkan boot, OFF mati.** Kotor OFF exit 1
+   sesudah 104,5–104,6 dtk tanpa `/health` (95 dtk tunggu heartbeat +
+   ~9 dtk boot sampai titik itu). Kotor ON `/health` 200 pada
+   21,4/22,9 dtk — **identik dengan boot bersih** (hemat ~82 dtk vs
+   OFF, dan yang lebih penting: boot yang tadinya GAGAL menjadi
+   berhasil). Baris log fast-path muncul di kedua run ON
+   (`mobile single-owner lock fast-path enabled …`) dan 0× di run OFF
+   — env benar-benar mencapai jalur lock pada boot nyata, bukan hanya
+   di test.
+3. **Ekspektasi §7.3 lama terkonfirmasi penuh** (bersih ON ≈ OFF;
+   kotor OFF exit ~95 dtk; kotor ON ≈ boot bersih).
 
 ### 7.4 Yang belum terbukti / pemblokir
 
-1. **Angka boot LAB F2 (clean + dirty, ON vs OFF, 2×)** — menunggu
-   `dist/` (lihat §7.2). Ekspektasi di §7.3 BUKAN hasil ukur.
+1. **Angka boot LAB F2 (clean + dirty, ON vs OFF, 2×)** — ✅
+   TERUKUR 25 Nov 2026 (lihat §7.3). Bersih ON ≈ OFF (noise); kotor
+   OFF exit 1 @ 104,5 dtk tanpa `/health`; kotor ON `/health` 200 @
+   21,4/22,9 dtk = boot bersih.
 2. **Shard tsgo `agents-tools` dst. (di luar `gateway-root`,
    `infra`, `agents-root`, `agents-other`)** — tidak dijalankan (di
    luar cakupan perubahan). **Diverifikasi Lane C #2:** keempat shard
