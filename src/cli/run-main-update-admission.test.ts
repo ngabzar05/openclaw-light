@@ -1,5 +1,5 @@
 import path from "node:path";
-import { afterEach, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { stripAnsi } from "../../packages/terminal-core/src/ansi.js";
 import { isUpdateAdmissionAuthorityEnvKey } from "../infra/update-admission-contract.js";
 import { resetLogger } from "../logging/logger.js";
@@ -7,7 +7,10 @@ import { loggingState } from "../logging/state.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { defaultRuntime } from "../runtime.js";
 import { resolveCliArgvInvocation } from "./argv-invocation.js";
-import { tryRunUpdateAdmissionBeforeStartup } from "./run-main-update-admission.js";
+import {
+  resolveUpdateAdmissionMobileBootRefusal,
+  tryRunUpdateAdmissionBeforeStartup,
+} from "./run-main-update-admission.js";
 import { updatePreflightCommand } from "./update-cli/update-command-preflight.js";
 
 // The real command's inspection is covered by update-command-admit tests and the published-driver cell.
@@ -151,3 +154,42 @@ it.each(["malformed", "authority"])(
     expect(process.exitCode).toBe(2);
   },
 );
+
+// Fork (F8): under mobile boot, update admission is refused outright —
+// Polones delivers updates through the APK, never via `openclaw update`.
+describe("resolveUpdateAdmissionMobileBootRefusal (fork F8)", () => {
+  const mobileBootOn = { enabled: true };
+  const mobileBootOff = { enabled: false };
+
+  it.each(["admit", "preflight"] as const)(
+    "refuses `update %s` under mobile boot",
+    (command) => {
+      const refusal = resolveUpdateAdmissionMobileBootRefusal(
+        mobileBootOn,
+        resolveCliArgvInvocation(["node", "openclaw", "update", command]),
+      );
+      expect(refusal).toMatch(/Self-update admission is disabled/);
+      expect(refusal).toMatch(/Polones APK/);
+    },
+  );
+
+  it("does not refuse when mobile boot is OFF", () => {
+    expect(
+      resolveUpdateAdmissionMobileBootRefusal(
+        mobileBootOff,
+        resolveCliArgvInvocation(["node", "openclaw", "update", "admit"]),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not refuse non-admission invocations under mobile boot", () => {
+    for (const argv of [
+      ["node", "openclaw", "gateway", "run"],
+      ["node", "openclaw", "update", "status"],
+      ["node", "openclaw", "update", "admit", "--help"],
+      ["node", "openclaw", "doctor"],
+    ]) {
+      expect(resolveUpdateAdmissionMobileBootRefusal(mobileBootOn, resolveCliArgvInvocation(argv))).toBeUndefined();
+    }
+  });
+});
