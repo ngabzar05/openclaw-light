@@ -215,3 +215,134 @@ Run `run1-on` (`OPENCLAW_MOBILE_BOOT=1`, aset prebuilt, 24 Nov 2026
    variansi antar-run terukur: `/health` OFF 21,8 ↔ 26,1 dtk. Lane
    berikutnya yang membandingkan fork vs upstream tetap harus mengulang
    minimal 2× per kondisi dalam kondisi CPU yang sama.
+
+---
+
+# Pengukuran Lane F — F3 + F6 + F8 + D2 (STATUS: LAB BOOT TERBLOKIR)
+
+> **Status 25 Nov 2026 ~01:40 WIB: angka LAB ON vs OFF BELUM ADA.**
+> Boot LAB membutuhkan `dist/` (tsdown) + aset Control UI prebuilt
+> (`pnpm ui:build`). Keduanya gagal diselesaikan di VM ini selama Lane F
+> berjalan, BUKAN karena kode Lane F, melainkan karena sumber daya mesin:
+>
+> - `pnpm ui:build`: percobaan 1 gagal — Vite transport invoke timeout
+>   60 dtk (`control-ui-i18n-catalog.ts`, 5123 modul sudah ter-transform);
+>   percobaan 2 terbunuh restart runtime; percobaan 3 gagal — lock basi
+>   `.artifacts/dist-artifacts.lock` dari percobaan 2 (dibersihkan);
+>   percobaan 4/5/6 gagal instant — EPERM intermiten pada redirect log
+>   dan pada tulis lock (fs-safe); percobaan 7 (log ke `~/workspace`)
+>   berjalan 8m16d sampai precompression 1146 aset lalu **terbunuh OOM
+>   (exit 137)** — memori tersedia saat itu ~1,8 GB, load ~22.
+> - `tsdown` (langkah `pnpm build`): belum dicoba — guard heap menuntut
+>   ≥4.352 MB (`OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB`), sementara memori
+>   tersedia 1,0–2,7 GB selama Lane F berjalan; menjalankan build 4,7 GB
+>   ke mesin sekecil itu akan OOM seperti `ui:build` dan berisiko
+>   membunuh pekerjaan lane lain. **JANGAN ulangi build saat memori
+>   tersedia <4,5 GB.**
+> - Runtime restart berulang (±3×) mematikan job latar yang panjang
+>   (vitest, proof, build) di tengah jalan; artefak yang selamat hanya
+>   yang tertulis ke disk persisten.
+>
+> Artinya: **tidak ada `/health`, `/ready`, `/`, atau angka sub-langkah
+> bootstrap ON vs OFF dari Lane F.** Bagian ini mendokumentasikan apa
+> yang SUDAH terukur/diverifikasi tanpa `dist/`, dan resep persis untuk
+> menjalankan LAB sesudah `dist/` tersedia — agar lane integrasi (atau
+> Lane F lanjutan) tidak mengulang pekerjaan ini.
+
+## 7. Yang sudah terverifikasi tanpa `dist/` (Lane F)
+
+### 7.1 Test unit/integrasi (vitest, semua hijau kecuali timeout load)
+
+| Test | Hasil |
+|---|---|
+| D2 `test/scripts/mobile-fast-boot-prune-prebuilds.test.ts` (tooling) | **5/5 lolos** |
+| F6 `src/entry-gateway.test.ts` (unit) | **4/4 lolos** |
+| F8 `src/cli/run-main-update-admission.test.ts` (cli) | **10/10 lolos** (7 lama + 3 baru) |
+| F3 `src/commands/config-preflight-snapshot.test.ts` (commands) | **18/23 lolos; 5 timeout 120 dtk, 0 gagal asersi** — termasuk 2/3 test baru F3 lolos di run penuh (`runStartupConfigPreflight` ON 111,2 dtk; N5 core-invalid 4,4 dtk) dan test ke-3 lolos solo (48,7 dtk). 5 timeout: 4 test lama OFF + 1 test baru — semuanya timeout, bukan asersi. Kontrol pristine: `shares startup validation` gagal JUGA tanpa perubahan Lane F (timeout); `overlaps config discovery` lolos di pristine (46,7 dtk) DAN lolos dengan perubahan Lane F saat sendirian (108,1 dtk) → timeout flaky karena load 10–26, bukan regresi. Durasi langkah tunggal terukur 35,6 dtk (`database-readiness`) di lingkungan ini vs ~1 dtk normal. |
+| Oxlint 18 berkas tersentuh (biner langsung; wrapper `run-oxlint.mjs` gagal di fase persiapan — timeout artifact 300 dtk karena load, bukan temuan lint) | **0 warning, 0 error** |
+| Typecheck `tsgo:core` | **BELUM SELESAI — terbunuh SIGTERM (exit 143)** sesudah ~7 mnt (mesin kehabisan memori / restart runtime; log `~/workspace/lane-f-logs/tsgo.log` hanya mencatat `[tsgo] FAILED (exit 143)`). Typecheck penuh belum pernah hijau di branch ini. |
+
+### 7.2 D2 — penghematan ukuran (terukur, tanpa `dist/`)
+
+Dry-run skrip prune atas pohon `pnpm install` lane-f
+(`node_modules/.pnpm`, linux-x64): **41 target, 1365,4 MiB total.**
+Subtotal yang relevan dengan APK (prod + task-named): **~60,4 MiB**
+(pi-tui 5 berkas ~108 KiB; resvg 4,2 MiB; node-pty ~1,1 MiB;
+fs-safe 4,6 MiB; proc-safe 2,4 MiB; cua-driver 47,9 MiB). Sisanya
+~1.305 MiB adalah dev/transitif (konteks pohon install, BUKAN klaim
+APK). Keeper linux-arm64 terverifikasi TIDAK ditargetkan. Detail +
+caveat codex: `docs/mobile-fast-boot/D2-PREBUILD-PRUNE.md`.
+
+### 7.3 Efek yang diperkirakan (hipotesis terukur, menunggu LAB)
+
+- **F3(a):** ~0 dtk wall di LAB (plugin-config paralel penuh dengan
+  rantai readiness). Nilai di perangkat (I/O emulasi) + via A3.
+- **F3(b):** 0 (netral perilaku, sengaja).
+- **F3(c):** ~0 di LAB state segar (eager sudah short-circuit); hemat
+  nyata pada warm state.
+- **F6 prewarm:** potensial ~1,9 dtk (`gateway.server-start-import`
+  menjadi cache-hit), dikurangi kompetisi CPU/disk dengan preflight —
+  efek bersih HARUS diukur, bisa nol/negatif.
+- **F8:** ~0 dtk boot (update check memang deferred); efeknya
+  penghapusan jalur, bukan kecepatan.
+- **D2:** ~0 dtk boot; hanya ukuran paket.
+
+## 8. Resep LAB Lane F (untuk integrasi / lanjutan)
+
+Jalankan HANYA bila memori tersedia ≥4,5 GB dan load <5
+(cek `free -m` + `uptime` dulu; bila tidak memenuhi, JANGAN mulai —
+build akan OOM dan membunuh pekerjaan lane lain):
+
+1. `pnpm ui:build` (aset Control UI prebuilt; bila gagal timeout
+   transport Vite 60 dtk, tunggu load reda lalu retry sekali —
+   jangan ubah kode karena timeout itu).
+2. Langkah tsdown inti SAJA (bukan full `pnpm build`):
+   `OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB=4608 node --import
+   ./scripts/tsx.mjs scripts/build-all.mts tsdown`
+   (bila guard tetap menolak / OOM, laporkan blocked dengan bukti
+   persis — jangan paksa).
+3. `--version` via kedua entry:
+   `node openclaw.mjs --version` (OFF, entry.js) dan
+   `OPENCLAW_MOBILE_BOOT=1 node openclaw.mjs --version` (ON,
+   entry-gateway.js). Keduanya harus mencetak versi yang sama.
+4. Smoke boot + `openclaw health` (ON dan OFF).
+5. Ukur dengan skrip yang sama seperti Lane A (jangan ubah skrip):
+   `docs/mobile-fast-boot/measure-baseline.sh lanef-run1-off`,
+   `lanef-run2-off`, `lanef-run1-on`, `lanef-run2-on`
+   (label baru — JANGAN menimpa artefak Lane A di `/tmp/lane-a-lab/`;
+   artefak Lane F di `/tmp/lane-f-lab/<label>/`).
+   Tiap run: `OPENCLAW_GATEWAY_STARTUP_TRACE=1`, state segar, port
+   18789, sleep 45 dtk pasca-`/` 200.
+6. Isi tabel di bawah dari `timings.tsv` + `phases.tsv` tiap run.
+   Periksa juga di `phases.tsv` ON: tidak ada
+   `post-attach.update-check`, dan baris log
+   `mobile boot: self-update check disabled` ada (F8); langkah
+   `admission.plugin-config` ada tapi tanpa
+   `admission.plugin-metadata-completion` (F3a); dan
+   `gateway.server-start-import` mengecil vs OFF (F6 prewarm).
+
+### 8.1 Definisi A + B (proksi) + `/ready` — Lane F (ISI SESUDAH LAB)
+
+| Run | `OPENCLAW_MOBILE_BOOT` | `/health` 200 pertama (A) | `/ready` 200 pertama | `/` 200 pertama (proksi B) |
+|---|---|---|---|---|
+| lanef-run1-off | OFF (kosong) | — | — | — |
+| lanef-run2-off | OFF (kosong) | — | — | — |
+| lanef-run1-on | `=1` | — | — | — |
+| lanef-run2-on | `=1` | — | — | — |
+
+### 8.2 Per fase (ISI SESUDAH LAB)
+
+Bandingkan khususnya: `gateway-run-bootstrap` / `config-ready`
+(`admission.plugin-config`, `admission.state-snapshot`,
+`admission.database-runtime-import`, `admission.session-runtime-import`,
+`admission.database-readiness`), `gateway.server-start-import`,
+`gateway-lock`, `sessions.admission`, `plugins.bootstrap`,
+`plugins.runtime-post-bind`, `runtime.post-attach`.
+
+### 8.3 Keterbatasan yang berlaku juga untuk LAB Lane F
+
+Sama seperti §6 (VM native x86_64, state segar + 1 sesi kosong, tanpa
+model/API key — chat pertama tidak terukur di lab), ditambah: variansi
+antar-run di lingkungan ini sangat besar (test yang sama bervariasi
+46 ↔ 131 dtk) — 2× per kondisi adalah minimum, dan perbedaan <±4 dtk
+di `/health` harus dinyatakan sebagai noise, bukan efek lane.
