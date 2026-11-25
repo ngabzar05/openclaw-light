@@ -1,4 +1,5 @@
 import { isMainThread } from "node:worker_threads";
+import type { MobileBootOptions } from "../gateway/mobile-boot.js";
 import { toSafeImportPath } from "../shared/import-specifier.js";
 import { VERSION } from "../version.js";
 import { runPluginRegistration } from "./api-lifecycle.js";
@@ -147,6 +148,13 @@ export function createPluginModuleLoader(options: {
   loaderFilename?: string;
   installNativeSdkResolver?: boolean;
   expectedSourceDigests?: Readonly<Record<string, string>>;
+  /**
+   * F5 (mobile boot): resolved mobile boot profile, threaded from the
+   * Gateway server options via `PluginLoadOptions`. When enabled, plugin
+   * generation capture never blocks the main thread (async-only worker
+   * calls). Absent = upstream behavior.
+   */
+  mobileBoot?: MobileBootOptions;
 }) {
   const cache = getPluginCache();
   const captured = {
@@ -252,13 +260,16 @@ export function createPluginModuleLoader(options: {
           return;
         }
         const { preparePluginGenerationArtifact } = await import("./plugin-generation-worker.js");
-        const preparedArtifact = await preparePluginGenerationArtifact(
-          bundledCapture ?? {
+        const preparedArtifact = await preparePluginGenerationArtifact({
+          ...(bundledCapture ?? {
             rootDir: owner.rootDir,
             source: modulePath,
             standalone: owner.standalone,
-          },
-        );
+          }),
+          // F5 (mobile boot): async-only capture during boot — the main
+          // thread never blocks in Atomics.wait while the Gateway starts.
+          ...(captured.mobileBoot !== undefined ? { mobileBoot: captured.mobileBoot } : {}),
+        });
         if (cache.retirement || isPluginRegistryRetired(owner.registry)) {
           await preparedArtifact.artifact.disposeAsync();
           throw new PluginInventoryRetiredError();

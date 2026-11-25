@@ -39,6 +39,7 @@ import type {
 import { getAsyncWorkSignal } from "../shared/async-work-scope.js";
 import { bindInProcessSessionDeliveryGeneration } from "./in-process-session-delivery.js";
 import { authorizeOperatorScopesForRequiredScope } from "./method-scopes.js";
+import type { MobileBootOptions } from "./mobile-boot.js";
 import { APPROVALS_SCOPE, normalizeOperatorScopeList } from "./operator-scopes.js";
 import type { GatewayNodeInvokeStream } from "./server-methods/shared-types.js";
 import type { GatewayContextResolver, GatewayRequestHandler } from "./server-methods/types.js";
@@ -383,6 +384,12 @@ export async function loadGatewayPlugins(params: {
   pluginLookUpTable?: PluginLookUpTable;
   pluginMetadataSnapshot?: PluginMetadataSnapshot;
   channelPluginLoadIntent?: ChannelPluginLoadIntent;
+  /**
+   * F5 (mobile boot): resolved mobile boot profile, threaded from the
+   * Gateway server options. When enabled, plugin generation capture never
+   * blocks the main thread. Absent = upstream behavior.
+   */
+  mobileBoot?: MobileBootOptions;
   suppressPluginInfoLogs?: boolean;
   startupTrace?: {
     detail: (name: string, metrics: ReadonlyArray<readonly [string, number | string]>) => void;
@@ -436,6 +443,9 @@ export async function loadGatewayPlugins(params: {
     logger,
     preferBuiltPluginArtifacts: true,
     expectedSourceDigests: params.expectedSourceDigests,
+    // F5 (mobile boot): carried into PluginLoadOptions so generation
+    // capture runs async-only during boot.
+    ...(params.mobileBoot !== undefined ? { mobileBoot: params.mobileBoot } : {}),
     metadataSnapshot,
     ...(loaderMetadata
       ? {

@@ -572,6 +572,10 @@ async function prepareGatewayServerBootstrapSelected(input: {
         ambientEnvTriggers,
         log,
         startupTrace,
+        // A3 (mobile boot): state dir the resolved startup plugin plan is
+        // cached under; only consulted when the profile is enabled.
+        mobileBoot,
+        stateDir: resolveStateDir(process.env),
       }),
     );
   });

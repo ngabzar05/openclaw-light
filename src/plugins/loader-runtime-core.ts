@@ -282,6 +282,9 @@ export function* loadOpenClawPluginsSteps(
       devSourceRoot: context.devSourceRoot,
       pluginSdkResolution: options.pluginSdkResolution,
       expectedSourceDigests: options.expectedSourceDigests,
+      // F5 (mobile boot): thread the resolved profile into generation
+      // capture so boot never blocks the main thread in Atomics.wait.
+      ...(options.mobileBoot !== undefined ? { mobileBoot: options.mobileBoot } : {}),
       ...overrides?.moduleLoader,
     });
     const borrowedSubagent = context.borrowedGatewayRuntime

@@ -239,12 +239,19 @@ export async function finishGatewayStartup(params: {
     const operation = Promise.resolve().then(() => run(runtime.connectionWork.signal));
     return runtime.connectionWork.track(() => operation);
   };
+  // F5 (mobile boot): ids of the startup plugins deferred to the
+  // background load after /ready (filled in by loadStartupPlugins when
+  // the mobile boot profile is enabled; empty otherwise).
+  let deferredStartupPluginIds: string[] = [];
   const postAttachHandles = await trackStartupWork(() =>
     startupTrace.measure("runtime.post-attach", () =>
       import("./server-startup-post-attach.js").then(({ startGatewayPostAttachRuntime }) =>
         startGatewayPostAttachRuntime({
           scheduler: runtime.scheduler,
           minimalTestGateway,
+          // F5 (mobile boot): resolved mobile boot profile, threaded from
+          // the Gateway server options.
+          mobileBoot: runtime.mobileBoot,
           updateCanary: opts.updateCanary,
           cfgAtStart,
           getConfig: getRuntimeConfig,
@@ -265,6 +272,11 @@ export async function finishGatewayStartup(params: {
           shouldStartPluginServices: () =>
             kernel.pluginRuntimeGeneration.currentServices() === null &&
             kernel.pluginRuntimeGeneration.getReloadStatus() === undefined,
+          // F5 (mobile boot): deferred services start unless a plugin
+          // reload is in progress (unlike shouldStartPluginServices,
+          // which is false once the first services handle exists).
+          shouldStartDeferredPluginServices: () =>
+            kernel.pluginRuntimeGeneration.getReloadStatus() === undefined,
           ambientEnvTriggers,
           pluginRegistry: pluginRuntime.registry,
           defaultWorkspaceDir,
@@ -277,7 +289,7 @@ export async function finishGatewayStartup(params: {
           refreshChatMetadata: chatMetadataLifecycle.refresh,
           loadStartupPlugins: async () => {
             const { loadGatewayStartupPluginRuntime } = await import("./server-startup-plugins.js");
-            return loadGatewayStartupPluginRuntime({
+            const loaded = await loadGatewayStartupPluginRuntime({
               cfg: gatewayPluginConfigAtStart,
               signal: runtime.connectionWork.signal,
               activationSourceConfig: startupActivationSourceConfig,
@@ -290,6 +302,41 @@ export async function finishGatewayStartup(params: {
               pluginLookUpTable: runtime.pluginLookUpTable,
               startupTrace,
               ambientEnvTriggers,
+              // F5 (mobile boot): async-only generation capture during
+              // boot; the split returns the plugins deferred to the
+              // background load after /ready.
+              mobileBoot: runtime.mobileBoot,
+              resolveGatewayContext: resolvePluginGatewayContext,
+            });
+            deferredStartupPluginIds = loaded.deferredPluginIds;
+            return loaded;
+          },
+          // F5 (mobile boot): background load of the deferred startup
+          // plugins, additive on top of the already-attached essential
+          // registry (unchanged records are retained, never reloaded).
+          // Runs after /ready; see startGatewayPostAttachRuntime.
+          loadDeferredStartupPlugins: async () => {
+            if (deferredStartupPluginIds.length === 0) {
+              return null;
+            }
+            const { loadGatewayStartupPluginRuntime } = await import("./server-startup-plugins.js");
+            return loadGatewayStartupPluginRuntime({
+              cfg: gatewayPluginConfigAtStart,
+              signal: runtime.connectionWork.signal,
+              activationSourceConfig: startupActivationSourceConfig,
+              workspaceDir: runtime.pluginWorkspaceDir,
+              log,
+              baseMethods: runtime.baseMethods,
+              coreGatewayMethodNames: runtime.coreGatewayMethodNames,
+              hostServices: runtime.pluginHostServices,
+              // Full plan: essentials are retained from the previous
+              // registry, only the deferred ids load fresh.
+              startupPluginIds: runtime.startupPluginIds,
+              pluginLookUpTable: runtime.pluginLookUpTable,
+              startupTrace,
+              ambientEnvTriggers,
+              mobileBoot: runtime.mobileBoot,
+              previousRegistry: pluginRuntime.registry,
               resolveGatewayContext: resolvePluginGatewayContext,
             });
           },
