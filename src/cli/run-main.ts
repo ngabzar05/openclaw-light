@@ -10,6 +10,10 @@ import {
 import { resolveGatewayPort } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { isLoopbackHost, isSecureWebSocketUrl } from "../gateway/net.js";
+import {
+  resolveMobileBootOptions,
+  type MobileBootOptions,
+} from "../gateway/mobile-boot.js";
 import { normalizeWebSocketProtocol } from "../gateway/websocket-protocol.js";
 import { normalizeEnv } from "../infra/env.js";
 import {
@@ -21,6 +25,7 @@ import type { PluginCliLoadSession } from "../plugins/cli-registry-loader.js";
 import { getPluginCache } from "../plugins/plugin-cache.js";
 import { withDeferredDebugProxyCapture } from "../proxy-capture/runtime-deferral.js";
 import { resolveCliArgvInvocation } from "./argv-invocation.js";
+import type { GatewayRunOpts } from "./gateway-cli/run-options.js";
 import {
   normalizeGeneratedHelpCommandArgv,
   normalizeRootHelpTargetArgv,
@@ -77,7 +82,11 @@ import {
   bootstrapCliProxyCaptureAndDispatcher,
   ensureCliEnvProxyDispatcher,
 } from "./run-main-proxy.js";
-import { tryRunUpdateAdmissionBeforeStartup } from "./run-main-update-admission.js";
+import {
+  isUpdateAdmissionInvocation,
+  resolveUpdateAdmissionMobileBootRefusal,
+  tryRunUpdateAdmissionBeforeStartup,
+} from "./run-main-update-admission.js";
 import type {
   BareRootLaunchTarget,
   GatewayLaunchTarget,
@@ -152,14 +161,27 @@ async function tryRunGatewayRunFastPath(
     process.exitCode = typeof err.exitCode === "number" ? err.exitCode : 1;
     throw err;
   });
-  const beforeRun = (opts: { force?: boolean; reset?: boolean }) =>
-    bootstrapGatewayRun({
+  // A1/F3 (fork): resolve the mobile boot profile exactly once for this
+  // gateway run, before any config-env rebuilding, and thread the resolved
+  // value down both branches: the preflight (via `bootstrapGatewayRun`)
+  // and the gateway action (attached to the resolved opts, consumed by
+  // `runGatewayCommandOnce` — `run.ts` must not re-read the env when the
+  // value is already attached). The only other resolution is the
+  // update-admission refusal in `runCli`, which runs only for
+  // `update admit`/`preflight` invocations (mutually exclusive with a
+  // gateway run in one process).
+  const mobileBoot: MobileBootOptions = resolveMobileBootOptions(process.env);
+  const beforeRun = (opts: GatewayRunOpts) => {
+    opts.mobileBoot = mobileBoot;
+    return bootstrapGatewayRun({
       opts,
       runtime: defaultRuntime,
       commandPath,
       startupPolicy,
       startupTrace,
+      mobileBoot,
     });
+  };
   const gateway = addGatewayRunCommand(
     program.command("gateway").description("Run, inspect, and query the WebSocket Gateway"),
     { beforeRun },
@@ -627,8 +649,28 @@ export async function runCli(
   const runtimeRecoveryEnv = options.runtimeRecoveryEnv ?? { ...process.env };
   const originalArgv = normalizeWindowsArgv(argv);
   const originalInvocation = resolveCliArgvInvocation(originalArgv);
-  if (await tryRunUpdateAdmissionBeforeStartup(originalInvocation)) {
-    return;
+  if (isUpdateAdmissionInvocation(originalInvocation)) {
+    // F8 (fork): under mobile boot the update-admission path is removed —
+    // Polones never self-updates; updates are delivered through the
+    // Polones APK, not by `openclaw update`. Refuse instead of running
+    // admission (or running the command without its admission boundary).
+    // OFF keeps the upstream admission path. This is the only other
+    // `OPENCLAW_MOBILE_BOOT` resolution besides the gateway-run fast
+    // path below, and the two never run in one process (update-admission
+    // invocations return here; gateway runs are not update-admission
+    // invocations), so "resolve once per process" still holds.
+    const refusal = resolveUpdateAdmissionMobileBootRefusal(
+      resolveMobileBootOptions(process.env),
+      originalInvocation,
+    );
+    if (refusal) {
+      console.error(`[openclaw] ${refusal}`);
+      process.exitCode = 2;
+      return;
+    }
+    if (await tryRunUpdateAdmissionBeforeStartup(originalInvocation)) {
+      return;
+    }
   }
   const builtInMachineOutput = resolveBuiltInMachineOutput(originalInvocation);
   const invoke = () =>

@@ -8,22 +8,32 @@ import {
 import type { RuntimeEnv } from "../../runtime.js";
 import type { resolveCliStartupPolicy } from "../command-startup-policy.js";
 import type { createGatewayDispatchStartupTrace } from "../startup-trace.js";
+import type { MobileBootOptions } from "../../gateway/mobile-boot.js";
 import type { GatewayRunOpts } from "./run-options.js";
 import { resolveGatewayRunOptions } from "./run-options.js";
 import { getGatewayRunRuntimeHooks } from "./runtime-hooks.js";
 
 type GatewayRunCommandHooks = {
-  beforeRun?: (opts: Pick<GatewayRunOpts, "force" | "reset">) => Promise<void> | void;
+  // Full `GatewayRunOpts` (fork: F3): the hook attaches the resolved
+  // mobile boot profile to the opts object, so it needs the whole object,
+  // not just `force`/`reset`.
+  beforeRun?: (opts: GatewayRunOpts) => Promise<void> | void;
 };
 
 export async function bootstrapGatewayRun(params: {
-  opts: Pick<GatewayRunOpts, "force" | "reset">;
+  opts: GatewayRunOpts;
   runtime: RuntimeEnv;
   commandPath: string[];
   startupPolicy: ReturnType<typeof resolveCliStartupPolicy>;
   startupTrace: ReturnType<typeof createGatewayDispatchStartupTrace>;
+  /**
+   * Mobile boot profile (fork: F3), resolved once by the CLI gateway-run
+   * path (`tryRunGatewayRunFastPath`, `src/cli/run-main.ts`). Threaded
+   * into the startup preflight below; `undefined` means OFF (upstream).
+   */
+  mobileBoot?: MobileBootOptions;
 }): Promise<void> {
-  const { opts, runtime, commandPath, startupPolicy, startupTrace } = params;
+  const { opts, runtime, commandPath, startupPolicy, startupTrace, mobileBoot } = params;
   let beforeStatePreparation: StartupConfigPreflightOptions["beforeStatePreparation"];
   const shouldBootstrap = await startupTrace.measure("gateway-run-pre-bootstrap", async () => {
     const { prepareGatewayRunBootstrap, recheckGatewayRunBootstrap } =
@@ -55,6 +65,7 @@ export async function bootstrapGatewayRun(params: {
       startupPolicy,
       loadPlugins: false,
       ...(beforeStatePreparation ? { beforeStatePreparation } : {}),
+      ...(mobileBoot ? { mobileBoot } : {}),
     });
     const { reloadTrustedGatewayRunEnvironment } = await import("./pre-bootstrap.js");
     await startupTrace.measure("gateway-run-reload-environment", () =>

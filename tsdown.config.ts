@@ -515,6 +515,9 @@ function buildCoreDistEntries(pluginIds: readonly string[]): Record<string, stri
   return {
     index: "src/index.ts",
     entry: "src/entry.ts",
+    // Fork (F6): gateway-only entry. Built alongside `entry` so the
+    // launcher can route foreground gateway runs to it under mobile boot.
+    "entry-gateway": "src/entry-gateway.ts",
     "gateway-prewarm": "src/gateway/server-start.ts",
     "infra/package-lifecycle": "src/infra/package-lifecycle.ts",
     "commands/doctor-update-schema-guard": "src/commands/doctor-update-schema-guard.ts",

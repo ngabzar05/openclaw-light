@@ -16,6 +16,7 @@ import type {
 import { ALLOW_OLDER_BINARY_DESTRUCTIVE_ACTIONS_ENV } from "../../config/future-version-guard.js";
 import {
   createConfigReadError,
+  createInvalidConfigError,
   isConfigReadFailure,
   isDoctorRecoverableInvalidConfigError,
   isInvalidConfigError,
@@ -473,6 +474,28 @@ async function runGatewayCommandOnce(opts: GatewayRunOpts, hooks: GatewayRunRunt
     await readGatewayStartupConfigWithShellEnv({
       startupTrace,
     });
+  // F3(a) (fork, mobile boot ON): the startup preflight read CORE config
+  // only, so a plugin-validation failure was not caught there — upstream
+  // catches it in `ensureConfigReady` (full metadata read) and blocks
+  // startup with exit 78. Enforce the same outcome here, still
+  // pre-listen, from this full read: an existing but plugin-invalid
+  // config must not start the Gateway. Read failures already threw
+  // above; a missing config (`snapshot.exists === false`) is the
+  // `--allow-unconfigured` fresh-start case and is left alone. The
+  // thrown invalid-config error is handled by `runGatewayCommand`
+  // (recovery offer, then exit 78) exactly like the preflight path.
+  // OFF never reaches this branch with an invalid snapshot: the
+  // preflight already blocked it.
+  if (
+    (opts.mobileBoot ?? resolveMobileBootOptions(process.env)).enabled &&
+    snapshot.exists &&
+    !snapshot.valid &&
+    !isConfigReadFailure(snapshot)
+  ) {
+    const { renderConfigValidationIssueLines } = await import("../../config/issue-location.js");
+    const details = renderConfigValidationIssueLines(snapshot).join("\n");
+    throw createInvalidConfigError(snapshot.path, details || "Unknown validation issue.");
+  }
   if (
     !enforceGatewayRunFutureConfigGuard({
       opts,

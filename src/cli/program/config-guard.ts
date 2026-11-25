@@ -13,6 +13,7 @@ import {
 import type { ConfigSnapshotReadMeasure } from "../../config/io.js";
 import { resolveIsConfigReadOnly } from "../../config/paths.js";
 import type { ConfigFileSnapshot } from "../../config/types.js";
+import { MOBILE_BOOT_DISABLED, type MobileBootOptions } from "../../gateway/mobile-boot.js";
 import {
   adoptProcessPluginCache,
   getPluginMetadataSnapshotCache,
@@ -76,6 +77,12 @@ export async function ensureConfigReady(params: {
   beforeStatePreparation?: StartupConfigPreflightOptions["beforeStatePreparation"];
   measure?: ConfigSnapshotReadMeasure;
   validateConfigOnly?: boolean;
+  /**
+   * Mobile boot profile (fork: F3), resolved once by the CLI gateway-run
+   * path and threaded through the startup preflight. `undefined` means
+   * OFF (upstream). Callers that do not supply it stay upstream.
+   */
+  mobileBoot?: MobileBootOptions;
 }): Promise<void> {
   await using preflightResources = new AsyncDisposableStack();
   let preflightCache: StartupConfigPreflightResult["pluginCache"];
@@ -122,6 +129,7 @@ export async function ensureConfigReady(params: {
         gateway: prepareGatewayState,
         ...(params.measure ? { measure: params.measure } : {}),
         ...(commandName === "status" ? { observe: false } : {}),
+        mobileBoot: params.mobileBoot ?? MOBILE_BOOT_DISABLED,
         ...(prepareGatewayState
           ? {
               validateStartupConfig: async (snapshot: ConfigFileSnapshot) => {
@@ -295,6 +303,7 @@ export async function ensureConfigReady(params: {
               gateway: false,
               ...(params.measure ? { measure: params.measure } : {}),
               ...(configSnapshotOptions?.observe === false ? { observe: false } : {}),
+              mobileBoot: params.mobileBoot ?? MOBILE_BOOT_DISABLED,
             })
           : undefined;
         preflightResources.use(retryPreflight?.pluginCache);

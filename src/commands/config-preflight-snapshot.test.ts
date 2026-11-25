@@ -518,3 +518,82 @@ it.each([
     expect(databaseFamily(databasePath)).toEqual(before);
   });
 });
+
+// Fork (F3): mobile boot reads CORE config only in the startup preflight
+// (plugin metadata is read once, pre-listen, by the gateway-run path in
+// `run.ts`), and the database/session runtime imports go through the
+// shared lazy-runtime loaders. The preflight result stays valid, the
+// step name `admission.plugin-config` is preserved in the trace, and no
+// plugin metadata snapshot is produced.
+it("reads core-only config under mobile boot (F3a) with lazy runtime imports (F3b)", async () => {
+  await withDoctorConfigPreflightHome(async (home) => {
+    writeConfig(home);
+    await withEnvAsync({ OPENCLAW_GATEWAY_STARTUP_TRACE: "1" }, async () => {
+      const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      try {
+        await using snapshots = createConfigPreflightSnapshotReader();
+        const result = await readAdmittedConfigSnapshot({
+          env: process.env,
+          // Core-only read, exactly what `prepareStartupConfig` issues
+          // under mobile boot (F3a).
+          readSnapshot: () =>
+            snapshots.read({
+              purpose: "startup",
+              allowCurrentPluginMetadata: false,
+              includePluginMetadata: false,
+              skipPluginValidation: true,
+              observe: false,
+            }),
+          mobileBoot: { enabled: true },
+        });
+        expect(result.snapshot.valid).toBe(true);
+        expect(result.pluginMetadataSnapshot).toBeUndefined();
+        const trace = stderr.mock.calls.map(([chunk]) => String(chunk)).join("");
+        // Step name preserved so ON/OFF traces stay comparable...
+        expect(trace).toMatch(/cli\.bootstrap\.admission\.plugin-config /);
+        // ...while the plugin-metadata discovery pass inside it is gone.
+        expect(trace).not.toMatch(/cli\.bootstrap\.admission\.plugin-metadata-completion /);
+        // F3(b): the readiness chain still runs through the lazy loaders.
+        expect(trace).toMatch(/cli\.bootstrap\.admission\.database-runtime-import /);
+        expect(trace).toMatch(/cli\.bootstrap\.admission\.session-runtime-import /);
+        expect(trace).toMatch(/cli\.bootstrap\.admission\.database-readiness /);
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+  });
+});
+
+// Fork (F3a): the mobile-boot preflight itself reads core-only — the
+// `runStartupConfigPreflight` entry point, not just the snapshot reader.
+it("reads core-only config from runStartupConfigPreflight under mobile boot (F3a)", async () => {
+  await withDoctorConfigPreflightHome(async (home) => {
+    writeConfig(home);
+    const result = await runStartupConfigPreflight({
+      gateway: true,
+      mobileBoot: { enabled: true },
+    });
+    expect(result.snapshot.valid).toBe(true);
+    expect(result.pluginMetadataSnapshot).toBeUndefined();
+    // OFF (upstream) still produces the plugin metadata snapshot.
+    const offResult = await runStartupConfigPreflight({ gateway: true });
+    expect(offResult.snapshot.valid).toBe(true);
+    expect(offResult.pluginMetadataSnapshot).toBeDefined();
+  });
+});
+
+// Fork (F3a, N5): core config validation still runs under mobile boot —
+// an invalid core config is reported invalid by the preflight, exactly
+// like upstream. (Plugin-invalid config is enforced instead by the
+// gateway-run path in `run.ts`, from its full metadata read.)
+it("still reports an invalid core config under mobile boot (F3a, N5)", async () => {
+  await withDoctorConfigPreflightHome(async (home) => {
+    writeConfig(home, { gateway: { mode: "bogus-mode" } });
+    const result = await runStartupConfigPreflight({
+      gateway: true,
+      mobileBoot: { enabled: true },
+    });
+    expect(result.snapshot.valid).toBe(false);
+    expect(result.pluginMetadataSnapshot).toBeUndefined();
+  });
+});
