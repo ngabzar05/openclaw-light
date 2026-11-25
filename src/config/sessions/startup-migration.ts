@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { formatCliCommand } from "../../cli/command-format.js";
+import type { MobileBootOptions } from "../../gateway/mobile-boot.js";
 import { withEngineStoreAdmission } from "../../infra/database-engine/admission-scope.js";
 import {
   readDeferredPluginSessionImport,
@@ -46,6 +47,13 @@ import {
   resolveSqliteTargetFromSessionStorePath,
   type SessionStoreRegistryRead,
 } from "./session-sqlite-target.js";
+import {
+  computeAgentDatabaseMigrationFingerprint,
+  readSessionMigrationWatermarks,
+  SESSION_MIGRATION_WATERMARK_AGENT_SCHEMA_VERSION,
+  writeSessionMigrationWatermarks,
+  type SessionMigrationWatermarkEntry,
+} from "./startup-migration-watermark.js";
 import {
   isConfiguredAgentDatabaseTarget,
   resolveAllAgentSessionStoreTargetsSync,
@@ -223,6 +231,13 @@ export async function runSessionStartupMigration(params: {
   log: SessionStartupMigrationLogger;
   handoffDatabase?: (database: OpenClawAgentDatabaseOptions) => Promise<void>;
   /**
+   * Mobile boot profile (fork: A1/F1/A4). When enabled, the per-target
+   * migration becomes incremental (A4, watermark — see
+   * `startup-migration-watermark.ts`); when absent/disabled, every target
+   * is migrated fully, exactly like upstream (guardrail N10).
+   */
+  mobileBoot?: MobileBootOptions;
+  /**
    * Optional startup-trace measurement, injected by the gateway bootstrap
    * (F9). The config layer never imports the gateway trace itself, so the
    * dependency stays one-directional. When absent, steps run unmeasured.
@@ -299,6 +314,28 @@ export async function runSessionStartupMigration(params: {
   const databases = new Set<string>();
   const coldCloses = new Set<string>();
   let interruptedSessions = 0;
+  // A4: incremental migration. The watermark is read once, before any
+  // per-target work: a target whose fingerprint is unchanged since its
+  // last successful full migration skips the expensive per-target work
+  // below (legacy run repair + canonical validation certification) and
+  // only gets the cheap identity assertion + handoff. The fleet-wide
+  // steps above (deletion snapshot, ACP keys, legacy main keys) always
+  // run — they are not per-session work and must not be skipped.
+  const incrementalMigration = params.mobileBoot?.enabled === true;
+  const watermarks = incrementalMigration
+    ? await measure("sessions.admission.watermark-read", () =>
+        Promise.resolve(readSessionMigrationWatermarks(env, params.log)),
+      )
+    : new Map<string, SessionMigrationWatermarkEntry>();
+  // Fingerprints recorded after each target's full migration succeeds;
+  // written to the state database only after the WHOLE run succeeds
+  // (see the write at the end of this function). Only the path + agent
+  // are recorded here: the fingerprint itself is computed at the end of
+  // the run, after cold handles close — closing a database can checkpoint
+  // its WAL, so a fingerprint taken earlier would describe bytes the next
+  // boot never sees and the watermark would never hit.
+  const migratedDatabaseAgentIds = new Map<string, string>();
+  let skippedWatermarkTargets = 0;
   const registeredDatabases = new Set(
     registeredDatabaseRows.map((entry) => `${entry.agentId}\0${entry.path}`),
   );
@@ -320,9 +357,32 @@ export async function runSessionStartupMigration(params: {
     ) {
       return;
     }
+    // A4: unchanged since the last successful full migration — skip the
+    // repair + certification below, but still hand the database off: the
+    // runtime owner (transcript maintenance, page-cache warming) needs
+    // every admitted database, migrated or not. The cheap identity
+    // assertion for this database runs through the handoff's
+    // `assertCurrent` closure (`assertExistingDatabaseIdentity`).
+    const storedWatermark = incrementalMigration ? watermarks.get(databasePath) : undefined;
+    const watermarkHit =
+      storedWatermark !== undefined &&
+      computeAgentDatabaseMigrationFingerprint(databasePath) === storedWatermark.fingerprint;
     let alreadyOpen: boolean | undefined;
     let handedOff = false;
     try {
+      if (watermarkHit) {
+        skippedWatermarkTargets += 1;
+        await measure("sessions.admission.target-skipped", async () => {
+          params.assertCurrent?.();
+          const handoffDatabase = params.handoffDatabase;
+          if (handoffDatabase) {
+            await handoffDatabase(options);
+            params.assertCurrent?.();
+            handedOff = true;
+          }
+        });
+        return;
+      }
       const { repairLegacySessionRunOutcomes } =
         await import("../../commands/doctor/shared/session-entry-rewrite.js");
       params.assertCurrent?.();
@@ -397,6 +457,11 @@ export async function runSessionStartupMigration(params: {
         params.assertCurrent?.();
         handedOff = true;
       }
+      // A4: record the migrated target. The fingerprint is computed at
+      // the end of the run (after cold closes), not here.
+      if (incrementalMigration) {
+        migratedDatabaseAgentIds.set(databasePath, options.agentId);
+      }
     } finally {
       if (alreadyOpen === false && !handedOff) {
         coldCloses.add(databasePath);
@@ -439,4 +504,33 @@ export async function runSessionStartupMigration(params: {
     params.log.info(`session: normalized ${interruptedSessions} legacy run(s) to killed`);
   }
   params.assertCurrent?.();
+  // A4: persist the watermark ONLY now — the whole run succeeded, so
+  // every recorded target really was fully migrated. A failed run throws
+  // above and writes nothing. Fingerprints are computed here, after the
+  // cold closes above, so they describe the exact on-disk state the next
+  // boot will see. Targets skipped via watermark keep their stored rows.
+  if (incrementalMigration) {
+    if (skippedWatermarkTargets > 0) {
+      params.log.info(
+        `session: skipped full migration for ${skippedWatermarkTargets} unchanged database(s) via migration watermark`,
+      );
+    }
+    const entries: SessionMigrationWatermarkEntry[] = [];
+    for (const [databasePath, agentId] of migratedDatabaseAgentIds) {
+      const fingerprint = computeAgentDatabaseMigrationFingerprint(databasePath);
+      if (fingerprint === undefined) {
+        continue;
+      }
+      entries.push({
+        agentDatabasePath: databasePath,
+        agentId,
+        agentSchemaVersion: SESSION_MIGRATION_WATERMARK_AGENT_SCHEMA_VERSION,
+        fingerprint,
+        migratedAtMs: Date.now(),
+      });
+    }
+    if (entries.length > 0) {
+      writeSessionMigrationWatermarks(env, entries, params.log);
+    }
+  }
 }

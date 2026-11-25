@@ -509,3 +509,70 @@ sesudahnya); `/ready` dan `/` tidak diukur di run kotor.
    shard tersisa tidak dapat gagal oleh perubahan ini.
 3. **Vonis perangkat (S1/S2/S3)** — tetap menunggu seperti sebelumnya;
    angka LAB bukan angka perangkat.
+## 9. Lane B (F1 + A4) — status pengukuran [LAB]
+
+### 9.1 Yang sudah terverifikasi tanpa build
+
+- **Unit: 11/11 lolos** (bare vitest, config pemilik; 25 Nov 2026
+  02:04–02:05 WIB, sesudah refactor ekstraksi §9.1.1):
+  - gateway `deferred-session-migration.test.ts`: 3/3, 10,3 dtk.
+  - runtime-config `startup-migration-watermark.test.ts` +
+    `startup-migration.mobile-boot.test.ts`: 8/8, 82,67 dtk.
+- **oxlint: bersih** — `config/tsconfig/oxlint.core.json`, 4 berkas,
+  "No problems in 4 files [171.24s]", exit 0.
+- **Typecheck: bersih** — `pnpm tsgo:core`, exit 0.
+- **Format: bersih** — `oxfmt --check`, 12 berkas Lane B.
+
+#### 9.1.1 Perbaikan sesudah 3 temuan oxlint
+
+- `startup-migration-watermark.test.ts`: `.sort()` → `.toSorted()`
+  (`unicorn/no-array-sort`).
+- `server-startup-finish.ts`: `await kernel.unlockStartupMethods()`
+  (`no-floating-promises`; tipe `() => void | Promise<void>`).
+- `server-startup-finish.ts`: 715 → ≤700 baris terhitung (`max-lines`)
+  dengan mengekstrak starter migrasi ke
+  `startDeferredSessionMigration()` di `deferred-session-migration.ts`
+  (modul tetap tanpa dependensi statis berat: impor
+  `prepareGatewayStartupSessions` tetap dinamis, di dalam span
+  `sessions.admission`). Pemadatan gate tanpa kurung kurawal sempat
+  melanggar `curly` — dikembalikan ke bentuk berkurung kurawal.
+
+### 9.2 Build runtime — TERBLOKIR lingkungan (bukan kode)
+
+Lantai ukur (komentar `scripts/tsdown-build.mts`): heap 4352 MB,
+puncak 4730 MiB; slice 4 GiB (heap 3328 MB) terbunuh di invokasi
+unified-runtime — **heap tidak bisa diturunkan**. Sourcemap sudah OFF
+secara default (`OUTPUT_SOURCE_MAPS` tidak disetel) dan profil runtime
+sudah tanpa DTS, jadi tidak ada tuas hemat-memori yang didukung.
+Puncak butuh tersedia >~5,5 GB berkelanjutan ±10 menit di VM 1,5 CPU /
+~8 GB yang dipakai 5+ lane paralel.
+
+| Upaya | Hasil |
+|---|---|
+| 1 | Gate heap menolak sebelum mulai (tersedia 3236 MB). |
+| 2 | OOM SIGKILL invokasi 2/2 sesudah 289 dtk (total 11 m 56 dtk). |
+| 3 | Dihentikan sendiri (tersedia jatuh ke 1,7 GB). |
+| 4 | OOM SIGKILL invokasi 2/2 sesudah 185,2 dtk (total 6 m 49 dtk). |
+| 5 | Lolos OOM (436,2 dtk) tapi gagal **EDQUOT** (`Disk quota exceeded`, os error 122) saat tulis `dist/effective-oauth-*.mjs`. |
+| 6 | Gagal instan EDQUOT (-122) di startup pnpm. |
+| 7 | Terbunuh **reboot VM** (uptime reset 02:42 WIB); log `/tmp` ikut terhapus. |
+
+`dist/` parsial 188 MB (tanpa `openclaw.mjs`) — **tidak bisa boot**.
+Kuota sempat pulih (probe tulis 50 MB OK 02:38 WIB) tapi jendela
+memori tidak pernah bertahan: tersedia berayun 1,0–6,5 GB dan jatuh
+tiap kali lane lain mulai build. **Syarat retry: tersedia >~5,5 GB +
+kuota pulih, dipertahankan selama build.**
+
+### 9.3 Pengukuran LAB ON vs OFF — TERTUNDA
+
+- Rencana: 2× ON (`OPENCLAW_MOBILE_BOOT=1`) + 2× OFF via
+  `measure-baseline.sh`; `/health`, `/ready`, `/`, fase
+  `sessions.admission` + watermark (run ke-2 ON harus menunjukkan
+  skip migrasi penuh).
+- Test e2e F1 (`gateway-mobile-boot-f1.e2e.test.ts`) terblokir di
+  global-setup fence — lolos sesudah stempel build current
+  (terbukti: fence tanpa `requireVerified` mengembalikan
+  `{"refuse":false}`; penyebabnya systemd sistem ada tapi user bus
+  tidak ada).
+- **Angka bagian ini BELUM ADA — jangan diisi dari perkiraan.**
+  Diisi sesudah `pnpm build:runtime` berhasil.

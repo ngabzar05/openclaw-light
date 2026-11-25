@@ -47,6 +47,7 @@ import { withArtifactPreservingStateReads } from "../state/openclaw-state-db-rea
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { assertOpenClawStateWriteAllowedAtPath } from "../state/openclaw-state-ownership-preflight.js";
 import { mergeGatewayAuthConfig } from "./auth-resolve.js";
+import { createDeferredSessionMigration } from "./deferred-session-migration.js";
 import { ADMIN_SCOPE } from "./method-scopes.js";
 import { listCoreGatewayMethodNames } from "./methods/core-method-policy.js";
 import { MOBILE_BOOT_DISABLED } from "./mobile-boot.js";
@@ -492,6 +493,15 @@ async function prepareGatewayServerBootstrapSelected(input: {
       startupConfigLoad.pluginMetadataSnapshot?.manifestRegistry,
     );
   }
+  // F1: create the deferred session-migration owner (mobile profile
+  // only). Minimal/test gateways and update canaries never run the
+  // fleet-wide migration here, so they get no deferred owner either.
+  // The owner is started post-listen by `finishGatewayStartup`; until
+  // then `startupSessionDatabases` below stays the empty placeholder.
+  const deferredSessionMigration =
+    mobileBoot.enabled && !minimalTestGateway && !opts.updateCanary
+      ? createDeferredSessionMigration()
+      : undefined;
   const preparations = [
     minimalTestGateway || opts.updateCanary
       ? Promise.resolve(undefined)
@@ -516,6 +526,16 @@ async function prepareGatewayServerBootstrapSelected(input: {
           );
         }
       });
+      // F1: under the mobile boot profile the fleet-wide session migration
+      // does NOT run here. This slot returns the empty placeholder; the
+      // real migration is started by `finishGatewayStartup` right after
+      // `http.bound`, in parallel with `runtime.post-attach`, and its
+      // admitted databases land in `deferredSessionMigration` instead.
+      // Agent RPCs stay gated until it settles (N6 — deferred, never
+      // skipped). Default OFF keeps the upstream pre-listen migration.
+      if (deferredSessionMigration) {
+        return [];
+      }
       return startupTrace.measure("sessions.admission", async () => {
         const { prepareGatewayStartupSessions } =
           await import("./server-startup-session-migration.js");
@@ -635,6 +655,10 @@ async function prepareGatewayServerBootstrapSelected(input: {
     // A1: resolved mobile boot profile, for lanes B–G to consume. `enabled:
     // false` means pure upstream behavior.
     mobileBoot,
+    // F1: deferred session migration (mobile profile only). `undefined`
+    // when the profile is off — the upstream pre-listen migration ran
+    // instead and `startupSessionDatabases` above holds its result.
+    deferredSessionMigration,
     startupTrace,
     configSnapshot,
     startupActivationSourceConfig,

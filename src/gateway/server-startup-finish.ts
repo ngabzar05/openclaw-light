@@ -20,6 +20,7 @@ import {
   listConfigReloadRefinementPrefixes,
 } from "./config-reload-plan.js";
 import { isCustomPluginUiEnabled } from "./control-ui-plugin-policy.js";
+import { startDeferredSessionMigration } from "./deferred-session-migration.js";
 import { GATEWAY_EVENTS } from "./events.js";
 import {
   indexPluginNodeCapabilitySurfaces,
@@ -127,6 +128,25 @@ export async function finishGatewayStartup(params: {
   } = runtime;
   const databaseStartupAdmission = getAgentDatabaseStartupAdmission();
   const databasePreparationReady = createDeferredCore();
+  // F1: under the mobile profile, the per-agent admission owner must not
+  // migrate before the fleet-wide migration (upstream order: fleet-wide
+  // first, pre-listen; per-agent after). The deferred migration runs in
+  // parallel with post-attach, so this gate resolves only once BOTH the
+  // worker runtime has started AND the deferred migration has settled
+  // (either outcome — on failure startup fails below and the close path
+  // aborts the waiters). Without a deferred migration the gate behaves
+  // exactly as upstream (resolve when the worker runtime starts).
+  const deferredSessionMigration = runtime.deferredSessionMigration;
+  let workerRuntimeStarted = false;
+  let deferredMigrationSettled = deferredSessionMigration === undefined;
+  const maybeResolveDatabasePreparation = () => {
+    if (workerRuntimeStarted && deferredMigrationSettled) {
+      databasePreparationReady.resolve();
+    }
+  };
+  const waitForDeferredSessionMigration = async (): Promise<void> => {
+    await deferredSessionMigration?.ready;
+  };
   const getReadiness = runtime.createHttpTransportOptions().getReadiness;
   const { attachGatewayWsConnectionHandler } = await startupTrace.measure(
     "gateway.ws-imports",
@@ -176,6 +196,31 @@ export async function finishGatewayStartup(params: {
   );
   await startupTrace.measure("http.listen", () => runtime.startListening());
   startupTrace.mark("http.bound");
+  // F1: start the deferred fleet-wide session migration now that the
+  // socket is bound. It runs in parallel with `runtime.post-attach`
+  // below; agent RPCs stay gated (via the delayed `unlockStartupMethods`
+  // + the live `/ready` check on it) until `ready` settles, and this
+  // function awaits it before marking ready, so a migration failure
+  // still fails startup exactly like the upstream pre-listen failure
+  // did (N6 — deferred, never skipped).
+  if (deferredSessionMigration) {
+    startDeferredSessionMigration(deferredSessionMigration, {
+      cfg: cfgAtStart,
+      env: process.env,
+      log,
+      mobileBoot: runtime.mobileBoot,
+      isClosing: () => lifecycle.closePreludeStarted,
+      abortSignal: runtime.connectionWork.signal,
+      // F9: measure the migration sub-steps, as the bootstrap did.
+      measure: (name, run) => startupTrace.measure(name, run),
+      // Resolve the per-agent preparation gate once the deferred
+      // migration settles (either outcome).
+      onSettled: () => {
+        deferredMigrationSettled = true;
+        maybeResolveDatabasePreparation();
+      },
+    });
+  }
   // Join independent preparation before channels start or failure cleanup retires its owners.
   const requestRuntimeReady = runtime.ensureRequestRuntimeReady().then(() => {
     // Readiness is also the performance collector's evidence boundary. Flush the
@@ -191,6 +236,9 @@ export async function finishGatewayStartup(params: {
         getPluginRegistry: () => pluginRuntime.registry,
         getPluginMetadataSnapshot,
         isCurrent: () => !lifecycle.closePreludeStarted,
+        // F1/A4: the per-agent migration runs the same incremental
+        // migration as the deferred fleet-wide one (same watermark).
+        mobileBoot: runtime.mobileBoot,
         log,
       });
     }
@@ -285,7 +333,16 @@ export async function finishGatewayStartup(params: {
           resolveGatewayContext: gatewayRequestContext.resolveGatewayContext!,
           logHooks,
           logChannels,
-          unlockStartupMethods: kernel.unlockStartupMethods,
+          unlockStartupMethods: async () => {
+            // F1: agent RPCs (`chat.send`/`agent`, in
+            // `STARTUP_UNAVAILABLE_GATEWAY_METHODS`) stay unavailable until
+            // the deferred session migration settles — the same per-RPC
+            // gate upstream already enforces before sidecars are ready
+            // (retryable `UNAVAILABLE` with `startup-sidecars` details).
+            // Without a deferred migration this is a straight pass-through.
+            await waitForDeferredSessionMigration();
+            await kernel.unlockStartupMethods();
+          },
           refreshChatMetadata: chatMetadataLifecycle.refresh,
           loadStartupPlugins: async () => {
             const { loadGatewayStartupPluginRuntime } = await import("./server-startup-plugins.js");
@@ -380,7 +437,11 @@ export async function finishGatewayStartup(params: {
             if (lifecycle.closePreludeStarted) {
               return null;
             }
-            databasePreparationReady.resolve(); // Plugins are attached; worker recovery awaits admission.
+            // Plugins are attached; worker recovery awaits admission — and,
+            // under the mobile profile, the deferred fleet-wide migration
+            // (F1): see `maybeResolveDatabasePreparation` above.
+            workerRuntimeStarted = true;
+            maybeResolveDatabasePreparation();
             return workerPlacementRuntime
               ? await workerPlacementRuntime.startRuntime({
                   startupTrace,
@@ -408,6 +469,14 @@ export async function finishGatewayStartup(params: {
   kernel.setPostAttachHandles(postAttachHandles);
   if (minimalTestGateway) {
     databasePreparationReady.resolve();
+  }
+  // F1: `/ready` must still imply "sessions admitted", as it did when
+  // admission ran pre-listen: await the deferred migration before the
+  // readiness publication below. A migration failure throws here and
+  // fails startup (N6), exactly like the upstream pre-listen failure.
+  // Skipped while closing: the close path already owns the failure.
+  if (deferredSessionMigration && !lifecycle.closePreludeStarted) {
+    await deferredSessionMigration.ready;
   }
   startupTrace.detail("memory.ready", [
     ...collectGatewayProcessMemoryUsageMb(),

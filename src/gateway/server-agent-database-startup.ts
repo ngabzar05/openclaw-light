@@ -17,6 +17,7 @@ import {
   type getAgentDatabaseStartupAdmission,
 } from "../state/agent-database-startup.js";
 import { isSameOpenClawAgentDatabasePath } from "../state/openclaw-agent-db.paths.js";
+import type { MobileBootOptions } from "./mobile-boot.js";
 
 function assertAgentDatabaseConfiguration(
   cfg: OpenClawConfig,
@@ -39,6 +40,13 @@ export function activateGatewayAgentDatabaseStartup(params: {
   getPluginRegistry: () => PluginRegistry;
   getPluginMetadataSnapshot: () => PluginMetadataSnapshot | undefined;
   isCurrent: () => boolean;
+  /**
+   * Mobile boot profile (fork: A1/F1/A4). When enabled, the per-agent
+   * migration runs the same incremental migration (watermark) as the
+   * deferred fleet-wide one; when absent/disabled, it migrates fully,
+   * exactly like upstream (guardrail N10).
+   */
+  mobileBoot?: MobileBootOptions;
   log: { info: (message: string) => void; warn: (message: string) => void };
 }): void {
   const broker = getSpawnBroker();
@@ -109,6 +117,7 @@ export function activateGatewayAgentDatabaseStartup(params: {
           env,
           agentIds: new Set([agentId]),
           assertCurrent: assertMigrationCurrent,
+          mobileBoot: params.mobileBoot,
           log: params.log,
         });
         assertMigrationCurrent();
