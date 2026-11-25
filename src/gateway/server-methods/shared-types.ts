@@ -41,6 +41,7 @@ import type { HealthSummary } from "../health/types.js";
 import type { LiveTextProjectionText } from "../live-text-continuity.js";
 import type { MentionInbox } from "../mention-inbox.contracts.js";
 import type { GatewayMethodRegistryView } from "../methods/descriptor.js";
+import type { MobileBootOptions } from "../mobile-boot.js";
 import type { NodeRegistry } from "../node-registry.js";
 import type { PlacementStandingGrantRuntime } from "../operator-approval-placement-grants.js";
 import type { GatewayOperatorRoleActor } from "../operator-role-actor.js";
@@ -199,6 +200,14 @@ type GatewayKernelContext = {
   cron: GatewayCronServiceContract;
   cronStorePath: string;
   getRuntimeConfig: () => OpenClawConfig;
+  /**
+   * Mobile fast-boot profile (fork: A1). Resolved exactly once per process
+   * by the CLI gateway-run path and threaded through `GatewayServerOptions`
+   * → bootstrap → kernel state → this request context. Absent means the
+   * profile is off (pure upstream behavior). Handlers must never read
+   * `OPENCLAW_MOBILE_BOOT` themselves.
+   */
+  mobileBoot?: MobileBootOptions;
   /** Instance-owned startup observation; never lends preparation or write authority. */
   agentDatabaseStartup?: {
     readonly hasPendingAgents: boolean;
