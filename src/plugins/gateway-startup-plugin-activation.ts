@@ -219,7 +219,8 @@ function passesPluginStartupPolicy(
   return bundled || activationState.explicitlyEnabled;
 }
 
-function manifestOwnsConfiguredContract(
+/** True when the manifest declares one of the configured providers for a contract family. */
+export function manifestOwnsConfiguredContract(
   manifest: PluginManifestRecord | undefined,
   contractKey: StartupContractKey,
   configuredProviderIds: ReadonlySet<string>,
@@ -233,7 +234,8 @@ function manifestOwnsConfiguredContract(
   );
 }
 
-function manifestOwnsConfiguredContractGroup(
+/** True when the manifest declares a configured provider in any group of a contract family. */
+export function manifestOwnsConfiguredContractGroup(
   manifest: PluginManifestRecord | undefined,
   configuredProviderIds: ConfiguredGenerationProviderIds | ConfiguredVoiceProviderIds,
 ): boolean {

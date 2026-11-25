@@ -1,4 +1,6 @@
 import { tryResolveConfiguredAgentWorkspaceDir } from "../agents/agent-scope.js";
+import { getConfiguredDecisionProviderIds } from "../agents/decision-model-setting.js";
+import { collectConfiguredAgentHarnessRuntimes } from "../agents/harness-runtimes.js";
 import { resolveDefaultAgentWorkspaceDir } from "../agents/workspace-default.js";
 import type { AmbientEnvTriggerPolicy } from "../channels/config-presence.js";
 import { validateConfiguredBindings } from "../channels/plugins/configured-binding-registry.js";
@@ -10,14 +12,36 @@ import {
   collectUnregisteredConfiguredMemoryEmbeddingProviders,
   listAmbientOnlyConfiguredChannelIds,
 } from "../plugins/channel-plugin-ids.js";
+import { listGatewayActivatedChannelIds } from "../plugins/channel-presence-policy.js";
+import { normalizePluginsConfigWithResolverCore } from "../plugins/config-normalization-shared.js";
+import { withContextEngineOwner } from "../plugins/config-state.js";
 import { getGatewayPluginMetadataSnapshot } from "../plugins/current-plugin-metadata-state.js";
 import { getRegisteredEmbeddingProvider } from "../plugins/embedding-providers.js";
+import {
+  manifestOwnsConfiguredContract,
+  manifestOwnsConfiguredContractGroup,
+} from "../plugins/gateway-startup-plugin-activation.js";
+import {
+  hasConfiguredActivationPath,
+  resolveContextEngineSlotStartupPluginId,
+  resolveMemorySlotStartupPluginId,
+} from "../plugins/gateway-startup-plugin-config.js";
+import {
+  collectConfiguredAgentModelProviderIds,
+  collectConfiguredGenerationProviderIds,
+  collectConfiguredMemoryEmbeddingProviderIds,
+  collectConfiguredVoiceProviderIds,
+  collectConfiguredWebSearchProviderIds,
+  manifestOwnsConfiguredModelProvider,
+} from "../plugins/gateway-startup-plugin-providers.js";
+import { collectConfiguredSpeechProviderIds } from "../plugins/gateway-startup-speech-providers.js";
 import { extractPluginInstallRecordsFromInstalledPluginIndex } from "../plugins/installed-plugin-index-install-records.js";
-import { loadPluginLookUpTable } from "../plugins/plugin-lookup-table.js";
+import { loadPluginLookUpTable, type PluginLookUpTable } from "../plugins/plugin-lookup-table.js";
 import {
   completePluginMetadataSnapshot,
   type PluginMetadataSnapshot,
 } from "../plugins/plugin-metadata-snapshot.js";
+import { createPluginRegistryIdNormalizer } from "../plugins/plugin-registry-contributions.js";
 import { resolveProviderPolicySurfaceForOwner } from "../plugins/provider-public-artifacts.js";
 import {
   markPluginRegistryActive,
@@ -31,6 +55,14 @@ import {
   getPluginRuntimeLoadContext,
   setPluginRuntimeLoadContext,
 } from "../plugins/runtime/load-context.js";
+import {
+  collectConfiguredStorageProviderIds,
+  manifestOwnsStorageProvider,
+} from "../plugins/storage-provider-manifest.js";
+import { collectConfiguredWorkerProviderIds } from "../plugins/worker-provider-config.js";
+import { normalizeWorkerProviderIds } from "../plugins/worker-provider-id.js";
+import { manifestOwnsWorkerProvider } from "../plugins/worker-provider-manifest.js";
+import type { MobileBootOptions } from "./mobile-boot.js";
 import { resolveGatewayStartupPluginActivationConfig } from "./plugin-activation-runtime-config.js";
 import { listGatewayMethods } from "./server-methods-list.js";
 import type { GatewayContextResolver } from "./server-methods/types.js";
@@ -146,6 +178,14 @@ export async function prepareGatewayPluginBootstrap(params: {
   ambientEnvTriggers?: AmbientEnvTriggerPolicy;
   /** F9 startup trace; when absent the plan steps run unmeasured. */
   startupTrace?: GatewayStartupTrace;
+  /**
+   * A3 (mobile boot): resolved mobile boot profile + Gateway state dir.
+   * The resolved startup plugin plan is cached under
+   * `<stateDir>/cache/startup-plugin-plan.json` only when the profile is
+   * enabled; absent = upstream behavior (resolve the plan every boot).
+   */
+  mobileBoot?: MobileBootOptions;
+  stateDir?: string;
 }) {
   const activationSourceConfig = params.activationSourceConfig ?? params.cfgAtStart;
 
@@ -185,6 +225,9 @@ export async function prepareGatewayPluginBootstrap(params: {
             metadataSnapshot: params.pluginMetadataSnapshot,
             workerProviderIds: params.workerProviderIds ?? [],
             ambientEnvTriggers: params.ambientEnvTriggers,
+            // A3 (mobile boot): cache the resolved startup plugin plan.
+            ...(params.mobileBoot !== undefined ? { mobileBoot: params.mobileBoot } : {}),
+            ...(params.stateDir !== undefined ? { stateDir: params.stateDir } : {}),
           }),
         );
   // Startup logging and lifecycle publication consume the process-stable metadata snapshot.
@@ -333,6 +376,181 @@ async function warnConfiguredMemoryEmbeddingProviderSetup(params: {
   );
 }
 
+export type MobileBootStartupPluginSplit = {
+  /**
+   * Plugins that must be loaded before /ready: owners of a configured
+   * provider (model, generation, voice, speech, web-search, decision,
+   * embedding, worker, storage), plugins with a configured activation
+   * path, the memory-slot and context-engine-slot plugins, owners of a
+   * configured agent harness runtime, and owners of a configured channel.
+   */
+  essentialPluginIds: string[];
+  /** Remaining startup-plan plugins: loaded in the background after /ready. */
+  deferredPluginIds: string[];
+};
+
+/**
+ * F5 (mobile boot): split the resolved startup plugin plan into the
+ * essential set (loaded before /ready) and the deferred set (loaded in the
+ * background after /ready).
+ *
+ * The split only partitions the already-resolved plan. `plugins.deny` and
+ * the allow-list were applied when the plan was resolved
+ * (`resolveGatewayStartupPluginPlanFromRegistry`), so a denied plugin can
+ * never appear in either set (N7). A plugin the split cannot classify
+ * (missing manifest/index entry) stays essential — fail-closed toward
+ * loading at boot, never toward silently dropping it.
+ *
+ * When the essential set would be empty, the whole plan stays essential:
+ * a boot with no plugins at all must not depend on the background load.
+ */
+export function resolveMobileBootStartupPluginSplit(params: {
+  startupPluginIds: readonly string[];
+  pluginLookUpTable?: Pick<PluginLookUpTable, "discovery" | "index" | "manifestRegistry">;
+  config: OpenClawConfig;
+  activationSourceConfig?: OpenClawConfig;
+  env: NodeJS.ProcessEnv;
+  workerProviderIds?: readonly string[];
+  platform?: NodeJS.Platform;
+  ambientEnvTriggers?: AmbientEnvTriggerPolicy;
+  log?: Pick<GatewayPluginBootstrapLog, "info">;
+}): MobileBootStartupPluginSplit {
+  const activationSourceConfig = params.activationSourceConfig ?? params.config;
+  const manifestRegistry = params.pluginLookUpTable?.manifestRegistry;
+  const index = params.pluginLookUpTable?.index;
+  const manifestById = new Map(
+    (manifestRegistry?.plugins ?? []).map((plugin) => [plugin.id, plugin]),
+  );
+  const indexById = new Map((index?.plugins ?? []).map((plugin) => [plugin.pluginId, plugin]));
+  const configuredModelProviderIds = manifestRegistry
+    ? collectConfiguredAgentModelProviderIds(activationSourceConfig, manifestRegistry)
+    : new Set<string>();
+  const configuredGenerationProviderIds =
+    collectConfiguredGenerationProviderIds(activationSourceConfig);
+  const configuredVoiceProviderIds = collectConfiguredVoiceProviderIds(activationSourceConfig);
+  const configuredSpeechProviderIds = collectConfiguredSpeechProviderIds(activationSourceConfig);
+  const configuredWebSearchProviderIds =
+    collectConfiguredWebSearchProviderIds(activationSourceConfig);
+  const configuredMemoryEmbeddingProviderIds =
+    collectConfiguredMemoryEmbeddingProviderIds(activationSourceConfig);
+  const configuredDecisionProviderIds = new Set(
+    getConfiguredDecisionProviderIds(activationSourceConfig),
+  );
+  const configuredWorkerProviderIds = new Set([
+    ...collectConfiguredWorkerProviderIds(activationSourceConfig),
+    ...normalizeWorkerProviderIds(params.workerProviderIds ?? []),
+  ]);
+  const configuredStorageProviderIds = new Set(
+    collectConfiguredStorageProviderIds(activationSourceConfig),
+  );
+  const configuredChannelIds = new Set(
+    listGatewayActivatedChannelIds({
+      config: params.config,
+      activationSourceConfig,
+      env: params.env,
+      ambientEnvTriggers: params.ambientEnvTriggers,
+      manifestRecords: manifestRegistry?.plugins ?? [],
+      discovery: params.pluginLookUpTable?.discovery,
+    }),
+  );
+  const requiredAgentHarnessRuntimes = new Set(
+    collectConfiguredAgentHarnessRuntimes(activationSourceConfig),
+  );
+  // The memory-slot and context-engine-slot plugins are resolved exactly
+  // like the plan does (same normalizer, same activation-source config).
+  let memorySlotPluginId: string | undefined;
+  let contextEngineSlotPluginId: string | undefined;
+  if (index && manifestRegistry) {
+    const normalizePluginId = createPluginRegistryIdNormalizer(index, { manifestRegistry });
+    const contextEngineOwners = index.plugins.map((plugin) => ({
+      id: plugin.pluginId,
+      contextEngineIds: plugin.contextEngineIds,
+    }));
+    const activationSourcePlugins = withContextEngineOwner(
+      normalizePluginsConfigWithResolverCore(activationSourceConfig.plugins, normalizePluginId),
+      contextEngineOwners,
+      normalizePluginId,
+    );
+    memorySlotPluginId = resolveMemorySlotStartupPluginId({
+      activationSourceConfig,
+      activationSourcePlugins,
+      normalizePluginId,
+    });
+    contextEngineSlotPluginId = resolveContextEngineSlotStartupPluginId({
+      records: index.plugins.map((plugin) => ({
+        id: plugin.pluginId,
+        contextEngineIds: plugin.contextEngineIds,
+      })),
+      activationSourceConfig,
+      activationSourcePlugins,
+      normalizePluginId,
+    });
+  }
+  const isEssential = (pluginId: string): boolean => {
+    const manifest = manifestById.get(pluginId);
+    const indexRecord = indexById.get(pluginId);
+    // Unclassifiable stays essential (fail-closed toward loading at boot).
+    if (!manifest && !indexRecord) {
+      return true;
+    }
+    if (pluginId === memorySlotPluginId || pluginId === contextEngineSlotPluginId) {
+      return true;
+    }
+    if (
+      indexRecord?.startup.agentHarnesses.some((runtime) =>
+        requiredAgentHarnessRuntimes.has(runtime),
+      )
+    ) {
+      return true;
+    }
+    if (
+      hasConfiguredActivationPath({ manifest, config: activationSourceConfig }) ||
+      manifestOwnsConfiguredModelProvider({ manifest, configuredModelProviderIds }) ||
+      manifestOwnsConfiguredContractGroup(manifest, configuredGenerationProviderIds) ||
+      manifestOwnsConfiguredContractGroup(manifest, configuredVoiceProviderIds) ||
+      manifestOwnsConfiguredContract(
+        manifest,
+        "decisionProviders",
+        configuredDecisionProviderIds,
+      ) ||
+      manifestOwnsConfiguredContract(manifest, "speechProviders", configuredSpeechProviderIds) ||
+      manifestOwnsConfiguredContract(
+        manifest,
+        "webSearchProviders",
+        configuredWebSearchProviderIds,
+      ) ||
+      manifestOwnsConfiguredContract(
+        manifest,
+        "embeddingProviders",
+        configuredMemoryEmbeddingProviderIds,
+      ) ||
+      manifestOwnsWorkerProvider(manifest, configuredWorkerProviderIds) ||
+      manifestOwnsStorageProvider(manifest, configuredStorageProviderIds) ||
+      (manifest?.channels.some((channelId) => configuredChannelIds.has(channelId)) ?? false)
+    ) {
+      return true;
+    }
+    return false;
+  };
+  const essentialPluginIds = params.startupPluginIds.filter(isEssential);
+  const deferredPluginIds = params.startupPluginIds.filter((id) => !isEssential(id));
+  if (essentialPluginIds.length === 0 && params.startupPluginIds.length > 0) {
+    // Nothing classifies as essential (e.g. no configured provider, slot,
+    // or channel): keep the whole plan essential instead of booting empty.
+    params.log?.info(
+      "mobile boot: no essential startup plugin classified; loading the full startup plan before /ready",
+    );
+    return {
+      essentialPluginIds: [...params.startupPluginIds],
+      deferredPluginIds: [],
+    };
+  }
+  params.log?.info(
+    `mobile boot: ${essentialPluginIds.length} essential startup plugin(s) before /ready, ${deferredPluginIds.length} deferred to background (${deferredPluginIds.join(", ") || "none"})`,
+  );
+  return { essentialPluginIds, deferredPluginIds };
+}
+
 /** Loads startup plugin runtimes after the gateway listener binds. */
 export async function loadGatewayStartupPluginRuntime(params: {
   cfg: OpenClawConfig;
@@ -348,9 +566,56 @@ export async function loadGatewayStartupPluginRuntime(params: {
   ambientEnvTriggers?: AmbientEnvTriggerPolicy;
   resolveGatewayContext?: GatewayContextResolver;
   signal?: AbortSignal;
+  /**
+   * F5 (mobile boot): resolved mobile boot profile, threaded from the
+   * Gateway server options. When enabled, only the essential startup
+   * plugins load before /ready; the rest are reported as
+   * `deferredPluginIds` for the background load after /ready. Absent =
+   * upstream behavior (full plan before /ready).
+   */
+  mobileBoot?: MobileBootOptions;
+  /**
+   * F5 (mobile boot): previous registry for the additive deferred load.
+   * When set, `startupPluginIds` are loaded additively on top of it
+   * (unchanged records are retained, never reloaded) and no split is
+   * applied. Only the deferred background load passes this.
+   */
+  previousRegistry?: PluginRegistry;
 }) {
+  // F5 (mobile boot): before /ready, load only the essential startup
+  // plugins; the rest load in the background after /ready (see
+  // startGatewayPostAttachRuntime). The deferred load passes
+  // previousRegistry and the full plan, so this split never runs twice.
+  const split =
+    params.mobileBoot?.enabled === true && !params.previousRegistry
+      ? resolveMobileBootStartupPluginSplit({
+          startupPluginIds: params.startupPluginIds,
+          pluginLookUpTable: params.pluginLookUpTable,
+          config: params.cfg,
+          activationSourceConfig: params.activationSourceConfig,
+          env: process.env,
+          ambientEnvTriggers: params.ambientEnvTriggers,
+          log: params.log,
+        })
+      : undefined;
+  const loadPluginIds = split?.essentialPluginIds ?? params.startupPluginIds;
+  const deferredPluginIds = split?.deferredPluginIds ?? [];
+  params.startupTrace?.detail("plugins.mobile-boot-split", [
+    ["essentialPluginCount", loadPluginIds.length],
+    ["deferredPluginCount", deferredPluginIds.length],
+    ["deferredPluginIds", deferredPluginIds.join(",")],
+  ]);
+  // F5: measure the state-migration readiness check and the lazy import
+  // separately, so the unmeasured gap inside plugins.runtime-post-bind
+  // (LAB run2-off: ~7 dtk with no log lines before the first plugin load)
+  // can be attributed to one of them on the next measurement run.
+  const beforeMigrationReadinessImport = performance.now();
   const { confirmPluginStateMigrationReadiness } =
     await import("../plugins/plugin-state-migration-readiness.js");
+  params.startupTrace?.detail("plugins.state-migration-import", [
+    ["durationMs", performance.now() - beforeMigrationReadinessImport],
+  ]);
+  const beforeMigrationReadiness = performance.now();
   try {
     await confirmPluginStateMigrationReadiness({
       config: params.activationSourceConfig ?? params.cfg,
@@ -361,6 +626,9 @@ export async function loadGatewayStartupPluginRuntime(params: {
   } catch (error) {
     params.log.warn(`Plugin data/settings readiness could not be confirmed: ${String(error)}`);
   }
+  params.startupTrace?.detail("plugins.state-migration-readiness", [
+    ["durationMs", performance.now() - beforeMigrationReadiness],
+  ]);
   // Keep server-plugin-bootstrap behind one lazy boundary; startup config tests can exercise
   // planning without importing plugin package runtimes.
   const beforeBootstrapImport = performance.now();
@@ -379,11 +647,15 @@ export async function loadGatewayStartupPluginRuntime(params: {
     ...(params.hostServices !== undefined && {
       hostServices: params.hostServices,
     }),
-    pluginIds: params.startupPluginIds,
+    pluginIds: loadPluginIds,
     pluginLookUpTable: params.pluginLookUpTable,
     channelPluginLoadIntent: "full",
     startupTrace: params.startupTrace,
     ambientEnvTriggers: params.ambientEnvTriggers,
+    // F5 (mobile boot): async-only generation capture during boot; the
+    // deferred background load retains the already-loaded essentials.
+    ...(params.mobileBoot !== undefined ? { mobileBoot: params.mobileBoot } : {}),
+    ...(params.previousRegistry !== undefined ? { previousRegistry: params.previousRegistry } : {}),
     ...(params.resolveGatewayContext
       ? { resolveGatewayContext: params.resolveGatewayContext }
       : {}),
@@ -410,7 +682,7 @@ export async function loadGatewayStartupPluginRuntime(params: {
     ).catch((error: unknown) => {
       params.log.warn(`Memory embedding setup checks failed: ${String(error)}`);
     });
-    return loaded;
+    return { ...loaded, deferredPluginIds };
   } catch (error) {
     loaded.retireGatewayRuntimeBindings();
     await disposePluginRegistryInstances(loaded.pluginRegistry).catch((cleanupError: unknown) => {

@@ -1,5 +1,6 @@
 import path from "node:path";
 import { MessageChannel, receiveMessageOnPort } from "node:worker_threads";
+import type { MobileBootOptions } from "../gateway/mobile-boot.js";
 import { captureRetainedNativeWorkerSource } from "../infra/worker-native-lifecycle.js";
 import { createDeferredCore } from "../shared/deferred.js";
 import { isArtifactPreservingStateRead } from "../state/artifact-preserving-state-reads.js";
@@ -35,6 +36,15 @@ type PreparationParameters = {
   rootDir: string;
   source: string | readonly string[];
   standalone?: boolean;
+  /**
+   * F5 (mobile boot): when the mobile boot profile is enabled, every
+   * generation call routes through the async path — the main thread never
+   * blocks in `Atomics.wait` while the Gateway starts. Sync-decoded worker
+   * functions therefore resolve as promises in this mode; boot callers
+   * already await them (recovery prefers `captureRecoverySourceAsync`).
+   * OFF = upstream behavior (sync calls keep `requestSync`).
+   */
+  mobileBoot?: MobileBootOptions;
 };
 /** Artifacts keep separate capture custody and share their owner's preparation isolate. */
 export async function preparePluginGenerationArtifact(
@@ -142,8 +152,11 @@ export async function preparePluginGenerationArtifact(
   const codec = new GenerationCodec(
     (handle, args, asynchronous, sourceCapture, disposal) => {
       // Terminal cleanup already owns remote disposal; callers join its outcome.
+      // F5 (mobile boot): async-only mode resolves disposal as the closing
+      // promise instead of returning synchronously.
+      const asyncOnly = params.mobileBoot?.enabled === true;
       if (closing && disposal) {
-        return asynchronous ? closing : undefined;
+        return asyncOnly || asynchronous ? closing : undefined;
       }
       const command: GenerationWorkerInput = {
         operation: "call",
@@ -152,7 +165,13 @@ export async function preparePluginGenerationArtifact(
         asynchronous,
         args: codec.encodeArguments(args),
       };
-      return asynchronous ? request(command) : requestSync(command, sourceCapture);
+      // F5 (mobile boot): during boot the main thread must never block in
+      // Atomics.wait (requestSync). Route every call through async request;
+      // source-capture calls keep their unbounded lifetime (no timeout),
+      // matching requestSync semantics for those operations.
+      return asyncOnly || asynchronous
+        ? request(command, sourceCapture)
+        : requestSync(command, sourceCapture);
     },
     {
       exportRoot: () => {
@@ -182,7 +201,7 @@ export async function preparePluginGenerationArtifact(
     }
     return codec.decode(reply.value);
   }
-  async function request(command: GenerationWorkerInput): Promise<unknown> {
+  async function request(command: GenerationWorkerInput, sourceCapture = false): Promise<unknown> {
     if (closing) {
       throw new Error("Plugin preparation worker has closed");
     }
@@ -194,7 +213,9 @@ export async function preparePluginGenerationArtifact(
         {
           // Capture cost scales with package size and filesystem latency. Its owner
           // controls retirement; an arbitrary deadline can reject healthy plugins.
-          ...(command.operation === "capture" ? {} : { timeoutMs: 120_000 }),
+          // Source-capture operations share that owner-controlled lifetime (they
+          // had no timeout on the requestSync path either).
+          ...(command.operation === "capture" || sourceCapture ? {} : { timeoutMs: 120_000 }),
           progressSignal: waitSignal,
           transferList: (value) =>
             value.operation === "capture" && value.callbackPort ? [value.callbackPort] : [],

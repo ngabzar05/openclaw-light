@@ -16,6 +16,7 @@ import { getGatewayContextLifetime } from "../plugins/runtime/gateway-request-sc
 import type { PluginServiceCronHost } from "../plugins/service-cron.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import type { MobileBootOptions } from "./mobile-boot.js";
 import type { GatewayBroadcastFn, GatewayBroadcastToConnIdsFn } from "./server-broadcast-types.js";
 import type { GatewayControlUiRootLifecycle } from "./server-control-ui-root.js";
 import type { GatewayClient, GatewayContextResolver } from "./server-methods/shared-types.js";
@@ -81,6 +82,28 @@ export async function startGatewayPostAttachRuntime(params: {
     gatewayMethods: string[];
     retireGatewayRuntimeBindings?: () => void;
   }>;
+  /**
+   * F5 (mobile boot): loads the deferred startup plugins (see
+   * `loadGatewayStartupPluginRuntime`) in the background after /ready.
+   * Returns null when there is nothing deferred. Only supplied when the
+   * mobile boot profile is enabled; the load is additive on top of the
+   * already-attached essential registry and never fails startup.
+   */
+  loadDeferredStartupPlugins?: () => Awaitable<{
+    pluginRegistry: PluginRegistry;
+    gatewayMethods: string[];
+    retireGatewayRuntimeBindings?: () => void;
+  } | null>;
+  /**
+   * F5 (mobile boot): whether the deferred startup plugins' services may
+   * start. Unlike `shouldStartPluginServices` (false once the first
+   * services handle exists), this only reports an in-progress plugin
+   * reload — the deferred services start is additive on top of the
+   * already-running services, never a second first-start.
+   */
+  shouldStartDeferredPluginServices?: () => boolean;
+  /** Resolved mobile boot profile, threaded from the Gateway server options. */
+  mobileBoot?: MobileBootOptions;
   onStartupPluginsLoading?: () => void;
   onStartupPluginsLoaded?: (result: {
     pluginRegistry: PluginRegistry;
@@ -136,21 +159,53 @@ export async function startGatewayPostAttachRuntime(params: {
   }
 
   let pluginRegistry = params.pluginRegistry;
-  const loadStartupPluginsIfNeeded = async () => {
-    if (params.minimalTestGateway || !params.loadStartupPlugins) {
+  // F5 (mobile boot): the services handle of the attached registry, so the
+  // deferred background load can start only the newly attached plugins'
+  // services (previous handle = retained services, never restarted).
+  let currentPluginServices: PluginServicesHandle | null = null;
+  const onPluginServices = (pluginServices: PluginServicesHandle | null) => {
+    currentPluginServices = pluginServices;
+    params.onPluginServices?.(pluginServices);
+  };
+  const loadStartupPluginsIfNeeded = async (
+    loader:
+      | (() => Awaitable<{
+          pluginRegistry: PluginRegistry;
+          gatewayMethods: string[];
+          retireGatewayRuntimeBindings?: () => void;
+        } | null>)
+      | undefined = params.loadStartupPlugins,
+    phase = "plugins.runtime-post-bind",
+  ) => {
+    if (params.minimalTestGateway || !loader) {
       return;
     }
     params.onStartupPluginsLoading?.();
-    // Capture retirement before starting work that can finish after shutdown begins.
-    const { disposePluginRegistryInstances } = await import("../plugins/runtime.js");
-    const loaded = await measureStartup(params.startupTrace, "plugins.runtime-post-bind", () =>
-      params.loadStartupPlugins!(),
-    );
+    // F5 (mobile boot): importing ../plugins/runtime.js eagerly costs
+    // seconds of unmeasured time inside this phase (LAB run2-off: a ~7 dtk
+    // gap with no log lines before the first plugin load). It is only
+    // needed to dispose an unattached registry, so with the mobile boot
+    // profile on it is imported lazily on that path instead. OFF keeps the
+    // eager import (upstream behavior); both paths are measured.
+    const eagerRuntimeImport =
+      params.mobileBoot?.enabled === true
+        ? undefined
+        : await measureStartup(
+            params.startupTrace,
+            "plugins.runtime-import",
+            () => import("../plugins/runtime.js"),
+          );
+    const loaded = await measureStartup(params.startupTrace, phase, () => loader());
+    if (!loaded) {
+      return;
+    }
     // Shutdown owns attached registries; this startup producer retires discarded results.
     const disposeUnattached = async () => {
       const current = params.getCurrentPluginRegistry?.() ?? pluginRegistry;
       if (loaded.pluginRegistry !== current) {
         loaded.retireGatewayRuntimeBindings?.();
+        const { disposePluginRegistryInstances } =
+          eagerRuntimeImport ?? (await import("../plugins/runtime.js"));
         await disposePluginRegistryInstances(loaded.pluginRegistry, current);
       }
       pluginRegistry = current;
@@ -182,7 +237,7 @@ export async function startGatewayPostAttachRuntime(params: {
       { generation: getPluginRegistryVersion(pluginRegistry) },
       { dropIfSlow: true },
     );
-    params.startupTrace?.detail("plugins.runtime-post-bind", [
+    params.startupTrace?.detail(phase, [
       [
         "loadedPluginCount",
         pluginRegistry.plugins.filter((plugin) => plugin.status === "loaded").length,
@@ -327,7 +382,7 @@ export async function startGatewayPostAttachRuntime(params: {
                   logHooks: params.logHooks,
                   logChannels: params.logChannels,
                   startupTrace: params.startupTrace,
-                  onPluginServices: params.onPluginServices,
+                  onPluginServices,
                   onPostReadySidecars: params.onPostReadySidecars,
                   shouldCreatePostReadySidecars: () => params.isClosing?.() !== true,
                   shouldStartPluginServices: () =>
@@ -401,6 +456,52 @@ export async function startGatewayPostAttachRuntime(params: {
               newGatewayLifetimeSidecars.length +
               (controlUiAssetsSidecar ? 1 : 0),
           });
+          // F5 (mobile boot): deferred startup plugins load in the
+          // background after /ready. Fire-and-forget: a failure here must
+          // never fail startup or block readiness. The load is additive
+          // (previousRegistry = the attached essential registry) and the
+          // services of the newly attached plugins start with the
+          // previous services handle (already-running services are
+          // retained, never restarted).
+          if (
+            params.mobileBoot?.enabled === true &&
+            params.loadDeferredStartupPlugins &&
+            !params.minimalTestGateway
+          ) {
+            void params
+              .trackStartupWork(async () => {
+                if (params.isClosing?.()) {
+                  return;
+                }
+                await loadStartupPluginsIfNeeded(
+                  params.loadDeferredStartupPlugins,
+                  "plugins.runtime-deferred",
+                );
+                if (
+                  params.isClosing?.() ||
+                  params.shouldStartDeferredPluginServices?.() === false
+                ) {
+                  return;
+                }
+                const { startPluginServices } = await import("../plugins/services.js");
+                await measureStartup(params.startupTrace, "plugins.runtime-deferred-services", () =>
+                  startPluginServices({
+                    registry: pluginRegistry,
+                    config: params.gatewayPluginConfigAtStart,
+                    workspaceDir: params.defaultWorkspaceDir,
+                    startupTrace: params.startupTrace,
+                    broadcastPluginEvent: params.broadcastPluginEvent,
+                    getCronService: params.getCronService,
+                    scheduler: params.scheduler,
+                    ...(currentPluginServices ? { previous: currentPluginServices } : {}),
+                    onHandle: onPluginServices,
+                  }),
+                );
+              })
+              .catch((error: unknown) => {
+                params.log.warn(`deferred startup plugins failed to load: ${String(error)}`);
+              });
+          }
           return pluginRegistry;
         });
   // Track original startup producers and their post-ready continuation so close

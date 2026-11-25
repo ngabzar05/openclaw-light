@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../config/types.plugins.js";
+import type { MobileBootOptions } from "../gateway/mobile-boot.js";
 import type { GatewayRequestHandler } from "../gateway/server-methods/types.js";
 import type { PluginCapabilityCatalogHostContext } from "./capability-catalog-context.types.js";
 import type { PluginCapabilityCatalog } from "./capability-catalog.types.js";
@@ -80,6 +81,13 @@ export type PluginLoadOptions = {
   prepareRegistrationFailureCleanup?: (registry: PluginRegistry, record: PluginRecord) => void;
   /** Validate captured source before evaluation; this never grants plugin authority. */
   expectedSourceDigests?: Readonly<Record<string, string>>;
+  /**
+   * F5 (mobile boot): resolved mobile boot profile, threaded from the Gateway
+   * server options — never read from the environment here. When enabled,
+   * plugin generation capture never blocks the main thread (async-only
+   * worker calls). Absent = upstream behavior.
+   */
+  mobileBoot?: MobileBootOptions;
   loadModules?: boolean;
   throwOnLoadError?: boolean;
   /** Exact lifecycle inventory supplied by a prepared load owner. */

@@ -1,5 +1,6 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import type { PluginInstallRecord } from "../../config/types.plugins.js";
+import type { MobileBootOptions } from "../../gateway/mobile-boot.js";
 import { createSubsystemLogger } from "../../logging.js";
 import { isDeeplyFrozenPlainData } from "../../shared/immutable-data.js";
 import { normalizePluginsConfig } from "../config-state.js";
@@ -33,6 +34,12 @@ export type PluginRuntimeLoadContext = {
   installRecords?: Record<string, PluginInstallRecord>;
   preferBuiltPluginArtifacts?: boolean;
   expectedSourceDigests?: PluginLoadOptions["expectedSourceDigests"];
+  /**
+   * F5 (mobile boot): resolved mobile boot profile for this load. Carried
+   * into `PluginLoadOptions` by `buildPluginRuntimeLoadOptions`; absent =
+   * upstream behavior.
+   */
+  mobileBoot?: MobileBootOptions;
   selectedContextEngine?: PluginRuntimeLoadContextState["selectedContextEngine"];
 };
 
@@ -161,6 +168,7 @@ type PluginRuntimeResolvedLoadValues = Pick<
   | "installRecords"
   | "preferBuiltPluginArtifacts"
   | "expectedSourceDigests"
+  | "mobileBoot"
 >;
 
 export const pluginRuntimeLoaderLogger: PluginLogger = {
@@ -186,6 +194,7 @@ export function buildPluginRuntimeLoadOptions(
     installRecords: values.installRecords,
     preferBuiltPluginArtifacts: values.preferBuiltPluginArtifacts,
     expectedSourceDigests: values.expectedSourceDigests,
+    ...(values.mobileBoot !== undefined ? { mobileBoot: values.mobileBoot } : {}),
     ...overrides,
   };
 }
