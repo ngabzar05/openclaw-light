@@ -113,20 +113,26 @@ build:runtime` exit 0 dalam 12m6s). Waiter build integrasi berjalan
 `~/workspace/integration-build-waiter.log`; `pnpm install --frozen-lockfile`
 di repo utama SUDAH selesai exit 0, 2m1d, `node_modules` 109 entri).
 
-**Reboot VM ~04:46 WIB (25 Nov)** — VM restart (uptime 1 mnt saat dicek
-04:47); waiter integrasi mati sesudah 45 cek tanpa jendela terbuka
+**Reboot VM ~11:46 WIB (25 Nov)** — VM restart (uptime 1 mnt saat dicek
+11:47 WIB); waiter integrasi mati sesudah 45 cek tanpa jendela terbuka
 (MemAvailable 449 MB–1,4 GB, tidak pernah mendekati 5.500 MB) dan loop tunggu
-ikut mati (log-nya kosong). Waiter di-restart 04:49 WIB (pid 3191, cek 1:
+ikut mati (log-nya kosong). Waiter di-restart 11:49 WIB (pid 3191, cek 1:
 1.443 MB) + loop tunggu baru 60 mnt. Pola: MemAvailable turun stabil
 ~50 MB/mnt saat tidak ada lane berjalan; jendela 5.500 MB terakhir terbuka
-~20 mnt sesudah reboot 02:42 WIB (6.119 MB, 03:02) — jendela paling mungkin
-terbuka tidak lama sesudah reboot. Tidak ada proses node/vitest/gateway
-tersisa; pemakai mem terbesar adalah daemon hatch (447 MB RSS) + replay apt
-pasca-reboot (proses sistem, jangan dibunuh). Bila jendela tidak terbuka
-dalam 180 cek waiter, build + ukur LAB terintegrasi butuh mesin/CI ber-heap
-≥4,4 GB.
+~20 mnt sesudah reboot 09:42 WIB (6.119 MB, 10:02 WIB) — jendela paling
+mungkin terbuka tidak lama sesudah reboot. Tidak ada proses
+node/vitest/gateway tersisa; pemakai mem terbesar adalah daemon hatch
+(447 MB RSS) + replay apt pasca-reboot (proses sistem, jangan dibunuh). Bila
+jendela tidak terbuka dalam 180 cek waiter, build + ukur LAB terintegrasi
+butuh mesin/CI ber-heap ≥4,4 GB.
 
-**Diagnosis memori (05:50 WIB):** `/proc/meminfo` menunjukkan MemTotal
+**Reboot VM lagi ~13:48 WIB (25 Nov)** — VM restart lagi (uptime 1 mnt saat
+dicek 13:49 WIB); waiter lama mati di cek 120 (13:48 WIB, 592 MB, tanpa
+jendela) dan loop tunggu 120 mnt terbunuh SIGTERM. Waiter di-restart 13:50
+WIB (pid 2050, cek 1: 1.716 MB, load 9,07) + loop tunggu baru 120 mnt.
+Total polling tanpa jendela sejauh ini: 45 + 120 cek (~2 jam 45 mnt).
+
+**Diagnosis memori (12:50 WIB):** `/proc/meminfo` menunjukkan MemTotal
 8.125 MB, MemFree 153 MB, AnonPages hanya 291 MB, Cached 676 MB, Slab
 338 MB, dan total RSS semua proses hanya 270 MB — sekitar 6,3 GB "used"
 TIDAK terlihat dari dalam VM ini (bukan proses, bukan cache, bukan slab,
@@ -134,9 +140,14 @@ bukan tmpfs). Kesimpulan: memori itu dipegang DI LUAR cell ini (host runtime
 / cell lain yang berbagi mesin yang sama) dan TIDAK bisa dibebaskan dari
 dalam VM (drop_caches pun hanya membebaskan ~0,9 GB). Jendela 5.500 MB
 bergantung pada host, bukan pada pekerjaan di VM ini. Loop tunggu 60 mnt
-(04:49–05:49) habis tanpa jendela (cek waiter 59–61: 674/665/654 MB; load
-0,03 — sistem menganggur tapi memori tetap penuh). Waiter masih berjalan
-(pid 3191, cek 61/180, timeout ~07:49 WIB bila jendela tidak terbuka).
+(11:49–12:49 WIB) habis tanpa jendela (cek waiter 59–61: 674/665/654 MB; load
+0,03 — sistem menganggur tapi memori tetap penuh). Waiter (generasi ke-2)
+berjalan sejak 13:50 WIB (pid 2050); timeout ~16:50 WIB bila jendela tidak
+terbuka.
+
+_Catatan zona waktu: jam sistem VM adalah UTC; semua waktu di laporan ini
+WIB (UTC+7). Label waktu pada catatan §4.3 sebelum revisi ini sebenarnya
+UTC dan sudah dikoreksi ke WIB._
 
 Sesudah build berhasil: ukur LAB 2× per kondisi (ON vs OFF) dengan
 `docs/mobile-fast-boot/measure-baseline.sh` + cek WebUI bisa-dipakai, lalu
