@@ -7,7 +7,11 @@ import { extractErrorCode } from "@openclaw/normalization-core/error-coercion";
 import { isRecord } from "@openclaw/normalization-core/record-coerce";
 import { getCliParentPid } from "../../cli-parent-lifetime.mjs";
 import { isForegroundGatewayRunArgv } from "../../gateway-run-argv.mjs";
-import { getFileLockProcessStartTime, isPidAlive } from "../shared/pid-alive.js";
+import {
+  getFileLockProcessStartTime,
+  isPidAlive,
+  isPidDefinitelyDead,
+} from "../shared/pid-alive.js";
 import { resolveOpenClawStateDirForDatabasePath } from "../state/openclaw-state-db.paths.js";
 import { readProcessMachineIdentity } from "./current-machine-identity.js";
 import { acquireFileLockSync } from "./file-lock-manager.js";
@@ -53,8 +57,26 @@ function comparableStateOwnerStaleReason(
       : undefined;
 }
 
-/** Reclamation requires proof that the recorded owner stopped. */
-export function isGatewayStateOwnerDefinitelyStale(value: unknown, lockPath: string): boolean {
+/**
+ * Reclamation requires proof that the recorded owner stopped.
+ *
+ * F2 single-owner mode (fork: Lane C, `options.singleOwner === true`):
+ * an `"unknown"` namespace no longer blocks reclamation when the recorded
+ * PID is provably dead (`isPidDefinitelyDead`: kill ESRCH + no
+ * `/proc/<pid>/status`). Under PRoot/Groot the namespace cannot be
+ * classified across a restart (D-12: no PID namespace isolates the numbers,
+ * no guest init protects PID 1), so without this weaker proof every dirty
+ * boot would wait out the full contention deadline. The weaker proof is
+ * ONLY accepted in single-owner mode — Polones guarantees from outside
+ * that no live second Gateway exists — and only for a PID that is
+ * provably dead; a live or merely unverifiable PID still throws, exactly
+ * as upstream, and still waits out the (shortened) deadline.
+ */
+export function isGatewayStateOwnerDefinitelyStale(
+  value: unknown,
+  lockPath: string,
+  options: { singleOwner?: boolean } = {},
+): boolean {
   const payload = isRecord(value) ? value : null;
   if (!payload) {
     // Exclusive creation precedes publication; an incomplete record still owns its lock.
@@ -62,6 +84,16 @@ export function isGatewayStateOwnerDefinitelyStale(value: unknown, lockPath: str
   }
   const namespace = classifyGatewayLockProcessNamespace(payload, lockPath);
   if (namespace === "unknown") {
+    // F2: see the doc comment above. `payload.pid` comes from an
+    // untrusted on-disk record, so it is validated before use.
+    if (
+      options.singleOwner === true &&
+      Number.isSafeInteger(payload.pid) &&
+      typeof payload.pid === "number" &&
+      isPidDefinitelyDead(payload.pid)
+    ) {
+      return true;
+    }
     throw new GatewayLockNamespaceError(payload, lockPath);
   }
   return comparableStateOwnerStaleReason(payload, namespace) !== undefined;
@@ -245,6 +277,13 @@ export function acquireGatewayStateOwnerFile(
   payload: LockPayload,
   busyTimeoutMs = 0,
   createdDirectories?: StateOwnerDirectoryIdentity[],
+  /**
+   * F2 single-owner mode (fork: Lane C). Threaded to
+   * `isGatewayStateOwnerDefinitelyStale`: a stale owner whose namespace
+   * is `"unknown"` is reclaimable when its PID is provably dead.
+   * Default (omitted) is upstream behavior.
+   */
+  options: { singleOwner?: boolean } = {},
 ) {
   const deadline = performance.now() + busyTimeoutMs;
   const restorationPath = `${resolveStateOwnerIdentity(databasePath).ownerPath}.gateway-restoration`;
@@ -253,7 +292,7 @@ export function acquireGatewayStateOwnerFile(
   const observed: { holder: LockPayload | null } = { holder: null };
   const stale = ({ payload: value }: { payload: unknown }) => {
     observed.holder = LockPayloadSchema.safeParse(value).data ?? null;
-    return isGatewayStateOwnerDefinitelyStale(observed.holder, pathname);
+    return isGatewayStateOwnerDefinitelyStale(observed.holder, pathname, options);
   };
   if (busyTimeoutMs > 0) {
     try {
@@ -262,7 +301,7 @@ export function acquireGatewayStateOwnerFile(
       ));
       if (
         previous &&
-        !isGatewayStateOwnerDefinitelyStale(previous, pathname) &&
+        !isGatewayStateOwnerDefinitelyStale(previous, pathname, options) &&
         (previous.pid === process.pid ||
           ((previous.role ?? "gateway") === "gateway" && isPidAlive(previous.pid)))
       ) {

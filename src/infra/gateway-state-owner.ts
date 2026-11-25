@@ -197,6 +197,13 @@ export function acquireGatewayStateOwner(params: {
   payload?: LockPayload;
   projectionPath?: string;
   getProjection?: () => GatewayStateProjection | undefined;
+  /**
+   * F2 single-owner mode (fork: Lane C). Threaded to
+   * `acquireGatewayStateOwnerFile`: a stale owner whose namespace is
+   * `"unknown"` is reclaimable when its PID is provably dead
+   * (`isPidDefinitelyDead`). Default false (upstream behavior).
+   */
+  singleOwner?: boolean;
 }): StateDatabaseSchemaLease {
   const identity = resolveStateOwnerIdentity(params.databasePath);
   const pathname = identity.ownerPath;
@@ -230,7 +237,9 @@ export function acquireGatewayStateOwner(params: {
     lost: new AbortController(),
     accepting: true,
   };
-  const lock = acquireGatewayStateOwnerFile(params.databasePath, pathname, payload);
+  const lock = acquireGatewayStateOwnerFile(params.databasePath, pathname, payload, 0, undefined, {
+    singleOwner: params.singleOwner,
+  });
   owner.locks.add(lock);
   readOwnerPaths.clear();
   owners.set(owner.key, owner);

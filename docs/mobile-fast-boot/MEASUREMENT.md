@@ -359,3 +359,153 @@ katalog lengkap (§7.3), bukan waktu boot.
   sampai 135 dtk) tetap menjadi pembanding akhir.
 - **Stall katalog 43,5 dtk** adalah angka perangkat; nilai LAB-nya
   (§7.3, kolom OFF cold) adalah lantai bawah tanpa inflasi emulasi.
+## 8. F2 — fast-path gateway-lock single-owner mobile (Lane C)
+
+### 8.1 Bukti unit/integration (bukan LAB boot — lolos penuh)
+
+Perilaku F2 dibuktikan pada berkas persis (filesystem + proses nyata,
+bukan mock lock): `src/infra/gateway-lock.single-owner.test.ts`
+(5 test) + regresi lock upstream + `src/gateway/mobile-boot.test.ts`.
+Jalankan: `node scripts/run-vitest.mjs run --config
+test/vitest/vitest.infra.config.ts <berkas>` (regresi) dan
+`--config /tmp/vitest-f2.config.mts` (single-owner, dari cwd mana pun —
+holder child di-`cwd`-kan ke root worktree).
+**Verifikasi ulang Lane C #2 (25 Nov 2026 ~02:46–03:00 WIB): semua angka
+di bawah direproduksi dari nol sesudah restart VM** — kecuali
+`run-vitest.mjs` yang dibunuh runner-nya sendiri sesudah 120 dtk tanpa
+output (cache vitest dingin pasca-restart), jadi test dijalankan lewat
+`./node_modules/.bin/vitest run` langsung dengan perintah yang sama.
+
+| Test                                                                                                                                                                                         | Hasil [LAB]                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| OFF (upstream): stale owner namespace `"unknown"` + PID mati TIDAK pernah direklamasi                                                                                                        | ✅ lolos (324 ms) — berkas byte-identik sesudahnya                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| ON: stale owner yang sama direklamasi LANGSUNG, tanpa membuat proyeksi `gateway.state.lock`                                                                                                  | ✅ lolos (175 ms) — owner file kini milik PID kami; state tetap bisa dipakai ulang upstream                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| ON: TIDAK PERNAH mereklamasi owner HIDUP, sesingkat apa pun deadline                                                                                                                         | ✅ lolos (201 ms)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ON: tunggu owner hidup dibatasi TEPAT 30 dtk (jam palsu) — upstream 300 dtk                                                                                                                  | ✅ lolos (1.006 ms) — pesan `"failed to acquire gateway state ownership; waited 30000ms …"` + `elapsedMs === 30_000`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| N2: proses kedua dengan env menyala exit `GatewayLockError` pada bind TCP eksklusif                                                                                                          | ✅ lolos (18,2 dtk; klaim Lane C #1: 11,6 dtk — variansi beban VM) — `GATEWAY_LOCK_ERROR` + `already listening`; proses pertama tetap melayani 200; owner mati proses kedua tetap bisa direklamasi upstream                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Regresi lock upstream (`gateway-lock`, `gateway-state-owner`, `gateway-lock.namespace`, `gateway-lock.hostname`, `gateway-lock-legacy`, `gateway-owner-lease`, `gateway-lock.write-failure`) | ✅ 163 lolos + 1 dilewati (7 berkas, 492,6 dtk)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `mobile-boot` (resolver A1+F2: lone `SINGLE_OWNER` tanpa A1 tidak berpengaruh)                                                                                                               | ✅ 24/24 lolos (6,3 dtk)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Typecheck tsgo                                                                                                                                                                               | ✅ `tsgo:core` exit 0 + shard test `gateway-root`, `infra`, `agents-root`, `agents-other` masing-masing exit 0 (dijalankan langsung per config `test/tsconfig/tsconfig.core.test.<shard>.json` — runner `run-tsgo-core-test-shards.mjs` menerima grup, bukan nama shard; lihat §8.4)                                                                                                                                                                                                                                                                                                                                                                     |
+| Lint/format                                                                                                                                                                                  | ✅ oxlint langsung 0 warning + 0 error (10 berkas tersentuh, 14,7 dtk) + oxfmt bersih (12 berkas tersentuh, `git diff --check` OK). Catatan: wrapper `scripts/run-oxlint.mjs` GAGAL dua kali bukan karena temuan lint — (a) `file lock stale` pada `.artifacts/dist-artifacts.lock/owner.json` (pemilik PID 6831 mati saat restart VM; direktori lock yang diabaikan git itu dihapus, pemilik terverifikasi mati via `kill -0`); (b) langkah persiapan `plugin-sdk boundary dts` timeout 300 dtk di bawah beban VM. Lint atas berkas F2 sendiri dibuktikan lewat oxlint langsung dengan `-c .oxlintrc.json --tsconfig config/tsconfig/oxlint.core.json`. |
+
+Catatan koreksi selama verifikasi: typecheck menemukan 1 error tipe
+nyata (`seedStaleOwner`: `env.OPENCLAW_STATE_DIR` bertipe `string |
+undefined`, diperbaiki dengan guard eksplisit); lint menemukan 4
+error (`fsSync` tak terpakai, 2× return di executor Promise,
+`gateway-lock.ts` 703 baris > batas 700 — dipadatkan komentar +
+`log.warn` + ekstraksi `gatewayTimeoutMs`).
+
+### 8.2 Status build `dist/` (prasyarat ukur boot)
+
+- **Preflight tsdown menolak build penuh tanpa override:**
+  `The resolved OpenClaw build heap is 2121MB, and a full build needs
+  4352MB, peaking near 4.7GB` (heap dihitung dari limit cgroup 6 GB
+  sel ini). Override yang disediakan tool
+  (`OPENCLAW_TSDOWN_MAX_OLD_SPACE_MB=4352`) dipakai untuk mencoba.
+- **Percobaan 1 (25 Nov 2026 ~01:40–01:58 WIB): GAGAL — OOM-kill
+  kernel (SIGKILL, exit 137) pada invocation 2/2 sesudah 975,9 dtk.**
+  Worker tsdown mencapai ~4 GB RSS (51,5% RAM VM) sementara RAM bebas
+  VM jatuh ke 159 MB (lane lain berjalan paralel). `dist/` hanya berisi
+  84 berkas / 752 KB dari invocation 1 (katalog ekstensi + worker
+  kecil) — **bundle utama gateway (chunk `.mjs`) TIDAK ADA**, jadi
+  gateway belum bisa di-boot dari `dist/` ini. `node openclaw.mjs
+  --version` mencetak `OpenClaw 2026.11.6 (1d9ecf4)` — itu TIDAK
+  membuktikan bundle ada (versi tidak memuat `dist/`).
+- Cache build (`.artifacts/build-all-cache/`) kosong — tidak ada yang
+  bisa di-restore; worktree Lane A (sumber `dist/` rujukan) sudah
+  dihapus. Swap tambahan tidak bisa dibuat (kuota disk: `fallocate`
+  1–4 GB gagal `Disk quota exceeded`, tulis 100 MB lolos).
+- **Percobaan ulang dijadwalkan sesudah jendela sepi VM** (tidak ada
+  lane lain yang sedang build). Bila tetap gagal, bagian ini dicatat
+  jujur sebagai pemblokir (lihat §8.4).
+- **Percobaan 2 (25 Nov 2026 ~03:26–03:39 WIB): BERHASIL —
+  `pnpm build:runtime` exit 0, total 12 m 6,1 dtk** (tsdown 4 m 15,6 dtk;
+  `ui:build` 2 m 53,1 dtk; `external-plugins:local-dist` 1 m 7 dtk).
+  Kondisi yang membedakan dari Percobaan 1: VM sepi (tidak ada lane
+  lain yang sedang build; load ~2,3), RAM tersedia ~3,7 GB di awal,
+  worker tsdown memuncak ~3,5 GB RSS. Cache
+  (`.artifacts/build-all-cache/`) tetap berisi 16 direktori KOSONG dari
+  Percobaan 1 — tidak ada yang di-restore; build ini penuh dari nol.
+  `dist/` kini 497 MB / 8.996 entri termasuk chunk `.mjs` utama, dan
+  `node openclaw.mjs --version` mencetak `OpenClaw 2026.11.6 (1d9ecf4)`
+  dari `dist/` yang nyata. `dist/` ini di-build dari working tree
+  pra-commit yang isinya identik dengan commit F2 (status git bersih
+  sesudah commit; hanya stempel versi build-info yang menunjuk
+  `1d9ecf4`).
+
+### 8.3 Ukur boot LAB — bersih + kotor, ON vs OFF (2× per kondisi)
+
+**TERUKUR 25 Nov 2026 ~03:41–03:54 WIB** (sesudah build Percobaan 2
+berhasil; `dist/` commit `bbef1646`). Metode: bersih via
+`docs/mobile-fast-boot/measure-baseline.sh` (`run1-f2-off`,
+`run2-f2-off`, `run1-f2-on`, `run2-f2-on`); kotor via
+`docs/mobile-fast-boot/measure-lock-dirty.sh` (`dirty1-f2-off`,
+`dirty2-f2-off`, `dirty1-f2-on`, `dirty2-f2-on` — fase 1 boot bersih →
+`kill -9` → patch `processNamespace` ke asing (D-12) → boot ulang).
+Artefak: `/tmp/lane-a-lab/<label>/` (bersih),
+`/tmp/lane-c-lab/<label>/` (kotor); salinan di
+`~/workspace/lane-c-lab/<label>/` (selamat dari restart VM).
+**Koreksi skrip selama ukur:** kedua skrip membuka flock SEBELUM
+`mkdir -p` direktori lab — sesudah restart VM `/tmp` kosong dan semua
+run gagal instan (exit 4). Diperbaiki: `mkdir -p` + `chmod 700`
+dipindah ke sebelum `exec 9>` (10 baris, 2 berkas).
+
+| Kondisi    | Run           | `/health` 200 pertama (A)         | `/ready` 200 | `/` 200 (proksi B) | `cli.bootstrap.gateway-lock` |
+| ---------- | ------------- | --------------------------------- | ------------ | ------------------ | ---------------------------- |
+| Bersih OFF | run1-f2-off   | 21,419 dtk                        | 37,162 dtk   | 37,391 dtk         | 1.978 ms                     |
+| Bersih OFF | run2-f2-off   | 21,333 dtk                        | 36,397 dtk   | 36,589 dtk         | 1.492 ms                     |
+| Bersih ON  | run1-f2-on    | 25,766 dtk                        | 40,994 dtk   | 41,314 dtk         | 962 ms                       |
+| Bersih ON  | run2-f2-on    | 22,037 dtk                        | 36,880 dtk   | 37,301 dtk         | 979 ms                       |
+| Kotor OFF  | dirty1-f2-off | — (exit 104,616 dtk, exit_code=1) | —            | —                  | 2.059 ms*                    |
+| Kotor OFF  | dirty2-f2-off | — (exit 104,468 dtk, exit_code=1) | —            | —                  | 1.627 ms*                    |
+| Kotor ON   | dirty1-f2-on  | 21,423 dtk                        | n/a†         | n/a†               | 1.612 ms                     |
+| Kotor ON   | dirty2-f2-on  | 22,867 dtk                        | n/a†         | n/a†               | 1.896 ms                     |
+
+\* Durasi langkah lock saja — kegagalan OFF terjadi sesudahnya, pada
+tunggu heartbeat 95 dtk (pesan: `Waiting up to 95 seconds for the
+previous Gateway to release state; an unverifiable owner will not be
+reclaimed automatically`, lalu `Gateway failed to start: cannot verify
+Gateway ownership … holder <pid> at foreign-host/pid-ns 999999999,
+last renewed 103 s ago`).
+† Skrip kotor hanya mem-poll `/health` di fase 3 (lalu berhenti 20 dtk
+sesudahnya); `/ready` dan `/` tidak diukur di run kotor.
+
+**Vonis F2 [LAB]:**
+
+1. **Bersih: ON ≈ OFF dalam batas noise.** `/health` ON 22,0–25,8 dtk
+   vs OFF 21,3–21,4 dtk; `/ready` dan `/` sama polanya. Run1-on
+   (+4,3 dtk vs OFF) adalah variansi antar-run (OFF sendiri bervariasi
+   ±4 dtk di §4.1; run2-on 22,0 dtk ≈ run2-off 21,3 dtk). Sesuai
+   ekspektasi: lock bersih hanya ~1,5–2,0 dtk dari ~21 dtk boot, dan
+   F2 memangkas langkah lock itu dari ~1.978/1.492 ms menjadi
+   ~962/979 ms (~0,5–1,0 dtk hemat) — kecil dan tertelan noise.
+2. **Kotor: ON menyelamatkan boot, OFF mati.** Kotor OFF exit 1
+   sesudah 104,5–104,6 dtk tanpa `/health` (95 dtk tunggu heartbeat +
+   ~9 dtk boot sampai titik itu). Kotor ON `/health` 200 pada
+   21,4/22,9 dtk — **identik dengan boot bersih** (hemat ~82 dtk vs
+   OFF, dan yang lebih penting: boot yang tadinya GAGAL menjadi
+   berhasil). Baris log fast-path muncul di kedua run ON
+   (`mobile single-owner lock fast-path enabled …`) dan 0× di run OFF
+   — env benar-benar mencapai jalur lock pada boot nyata, bukan hanya
+   di test.
+3. **Ekspektasi §8.3 lama terkonfirmasi penuh** (bersih ON ≈ OFF;
+   kotor OFF exit ~95 dtk; kotor ON ≈ boot bersih).
+
+### 8.4 Yang belum terbukti / pemblokir
+
+1. **Angka boot LAB F2 (clean + dirty, ON vs OFF, 2×)** — ✅
+   TERUKUR 25 Nov 2026 (lihat §8.3). Bersih ON ≈ OFF (noise); kotor
+   OFF exit 1 @ 104,5 dtk tanpa `/health`; kotor ON `/health` 200 @
+   21,4/22,9 dtk = boot bersih.
+2. **Shard tsgo `agents-tools` dst. (di luar `gateway-root`,
+   `infra`, `agents-root`, `agents-other`)** — tidak dijalankan (di
+   luar cakupan perubahan). **Diverifikasi Lane C #2:** keempat shard
+   di atas masing-masing exit 0 (dijalankan langsung per config);
+   `tsgo:core` lolos untuk semua `src/`; semua perubahan signature
+   bersifat aditif/opsional; grep membuktikan tidak ada berkas test
+   lain yang mengonstruksi `MobileBootOptions` literal (hanya
+   `mobile-boot.ts`/`mobile-boot.test.ts` + test F2 sendiri; semua
+   pemakaian lain hanya threading `mobileBoot?:` opsional) — jadi
+   shard tersisa tidak dapat gagal oleh perubahan ini.
+3. **Vonis perangkat (S1/S2/S3)** — tetap menunggu seperti sebelumnya;
+   angka LAB bukan angka perangkat.

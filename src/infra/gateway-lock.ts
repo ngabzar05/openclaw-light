@@ -9,6 +9,7 @@ import {
   resolveTimestampMsToIsoString,
 } from "@openclaw/normalization-core/number-coercion";
 import { resolveConfigPath, resolveGatewayLockDir, resolveStateDir } from "../config/paths.js";
+import type { MobileBootOptions } from "../gateway/mobile-boot.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { isPidAlive, isPidDefinitelyDead } from "../shared/pid-alive.js";
 import {
@@ -91,9 +92,28 @@ export type GatewayLockOptions = {
   databaseAccess?: "none";
   listenerMode?: "foreground" | "supervised";
   supervisor?: GatewayOwnerSupervisor | null;
+  /**
+   * Mobile boot profile (fork: A1 + F2), resolved once per process and
+   * threaded in by the CLI gateway-run path / `startGatewayServer`. When
+   * `singleOwner` is true the F2 fast-path applies (see `acquireGatewayLock`):
+   * file-lock projection + lease assertion skipped, contention deadline
+   * shortened to `MOBILE_SINGLE_OWNER_LOCK_TIMEOUT_MS`, and
+   * `isPidDefinitelyDead` suffices to reclaim an `"unknown"`-namespace owner.
+   * Omitted (or `singleOwner: false`) is pure upstream behavior. The
+   * exclusive TCP bind on the gateway port (N2, `listenGatewayHttpServer`)
+   * is NEVER skipped — it is the last guard that makes the fast-path safe.
+   */
+  mobileBoot?: MobileBootOptions;
 };
 
 export const GATEWAY_LIFECYCLE_LOCK_TIMEOUT_MS = 5 * 60_000;
+/**
+ * F2 single-owner contention deadline (fork: Lane C): 30 s — 10× the
+ * clean-lock cost (1,6 dtk [LAB], Lane A baseline), 10× shorter than the
+ * upstream 300 s worst case. Bounds only the wait for an owner that cannot
+ * be proven dead; a provably-dead owner is reclaimed immediately.
+ */
+export const MOBILE_SINGLE_OWNER_LOCK_TIMEOUT_MS = 30_000;
 const log = createSubsystemLogger("gateway");
 
 export type GatewayLockIdentity = {
@@ -149,6 +169,12 @@ function resolveGatewayOwnerStatusSync(
     deadlineMs?: number;
     signal?: AbortSignal;
     lockPath?: string;
+    /**
+     * F2 single-owner mode (fork: Lane C). When true, an `"unknown"`
+     * owner namespace no longer blocks reclamation of a provably-dead
+     * PID — see the branch below. Default false (upstream behavior).
+     */
+    singleOwner?: boolean;
   } = {},
 ): LockOwnerStatus {
   const remainingTimeoutMs = () => {
@@ -163,6 +189,17 @@ function resolveGatewayOwnerStatusSync(
   remainingTimeoutMs();
   const namespace = classifyGatewayLockProcessNamespace(payload, opts.lockPath);
   if (namespace !== "same") {
+    // F2 (fork: Lane C, single-owner mode only): the namespace cannot be
+    // classified across a restart under PRoot/Groot (D-12), so an
+    // "unknown" namespace must not by itself block reclamation of a
+    // provably-dead owner — Polones guarantees from outside that no live
+    // second Gateway exists. `isPidDefinitelyDead` (kill ESRCH + no
+    // /proc/<pid>/status) is the only weaker proof accepted, and only
+    // here. Anything not provably dead stays "unknown" and still waits
+    // out the (shortened) contention deadline instead of being reclaimed.
+    if (namespace === "unknown" && opts.singleOwner === true && isPidDefinitelyDead(pid)) {
+      return "dead";
+    }
     return namespace;
   }
   const role = payload?.role ?? "gateway";
@@ -255,14 +292,35 @@ function shouldReclaimGatewayLock(params: {
   lockPath: string;
   payload: LockPayload | null;
   platform: NodeJS.Platform;
+  /**
+   * F2 single-owner mode (fork: Lane C). When true, a provably-dead PID
+   * is reclaimable even when its namespace is `"unknown"` (D-12) — the
+   * same weaker proof as in `resolveGatewayOwnerStatusSync`. Anything
+   * not provably dead still throws, exactly as upstream.
+   */
+  singleOwner?: boolean;
 }): boolean {
   if (classifyGatewayLockProcessNamespace(params.payload, params.lockPath) === "unknown") {
+    // F2: see `resolveGatewayOwnerStatusSync` — same weaker proof, same
+    // single-owner-only scope. (In single-owner mode the file-lock
+    // projection this guards is skipped outright, so this branch is
+    // defense-in-depth for any future caller that reclaims through here.)
+    const ownerPid = params.payload?.pid;
+    if (
+      params.singleOwner === true &&
+      ownerPid !== undefined &&
+      Number.isSafeInteger(ownerPid) &&
+      isPidDefinitelyDead(ownerPid)
+    ) {
+      return true;
+    }
     throw new GatewayLockNamespaceError(params.payload ?? {}, params.lockPath);
   }
   const ownerPid = params.payload?.pid;
   const ownerStatus = ownerPid
     ? resolveGatewayOwnerStatusSync(ownerPid, params.payload, params.platform, {
         lockPath: params.lockPath,
+        singleOwner: params.singleOwner,
       })
     : "unknown";
   if (ownerPid) {
@@ -388,6 +446,13 @@ async function readVerifiedGatewayLockIdentity(
 async function assertHistoricalGatewayOwnerStopped(
   paths: ReturnType<typeof resolveGatewayLockPaths>,
   opts: GatewayLockOptions,
+  /**
+   * F2 single-owner mode (fork: Lane C). When true, a historical owner
+   * whose namespace is `"unknown"` but whose PID is provably dead is
+   * treated as stopped (same weaker proof as `resolveGatewayOwnerStatusSync`).
+   * A live or unverifiable owner still refuses startup, exactly as upstream.
+   */
+  singleOwner = false,
 ): Promise<void> {
   for (const lockPath of [paths.stateLockPath, paths.configLockPath]) {
     const payload = await readLockPayload(lockPath, true);
@@ -395,13 +460,21 @@ async function assertHistoricalGatewayOwnerStopped(
       continue;
     }
     if (classifyGatewayLockProcessNamespace(payload, lockPath) === "unknown") {
+      // F2: a provably-dead historical owner is not a live owner, even
+      // when its namespace cannot be classified (D-12). Polones sweeps
+      // these sidecars before spawn, so in the Polones flow this file
+      // should not exist at all — this branch only covers a sweep that
+      // missed one, or a lab run.
+      if (singleOwner && Number.isSafeInteger(payload.pid) && isPidDefinitelyDead(payload.pid)) {
+        continue;
+      }
       throw new GatewayLockNamespaceError(payload, lockPath);
     }
     const owner = await resolveGatewayOwnerStatus(
       payload.pid,
       payload,
       opts.platform ?? process.platform,
-      { trustUnknownCmdlineOwner: false, lockPath },
+      { trustUnknownCmdlineOwner: false, lockPath, singleOwner },
     );
     if (owner !== "dead") {
       throw new GatewayStateOwnerContentionError(
@@ -421,6 +494,20 @@ export async function acquireGatewayLock(
   if (opts.allowInTests !== true && (env.VITEST || env.NODE_ENV === "test")) {
     return null;
   }
+  // F2 single-owner fast-path (fork: Lane C). Active ONLY when the mobile
+  // profile is on AND the single-owner switch is set (both resolved once per
+  // process by `resolveMobileBootOptions`, threaded in via `opts.mobileBoot`).
+  // The caller asserts the Polones external guarantee (one daemon, one slot
+  // per harness, lock + lease swept before spawn). Default (no `mobileBoot`)
+  // is pure upstream behavior (N10). The exclusive TCP bind (N2) is untouched.
+  const singleOwner = opts.mobileBoot?.enabled === true && opts.mobileBoot.singleOwner === true;
+  if (singleOwner) {
+    log.warn(
+      "mobile single-owner lock fast-path enabled (OPENCLAW_MOBILE_SINGLE_OWNER=1): file-lock " +
+        "projection + owner-lease assertion skipped; a provably-dead owner is reclaimed even " +
+        "with an unknown namespace. Only safe under the Polones external guarantee; never enable outside Polones.",
+    );
+  }
   // Ordinary process roles admit database access directly; config repair needs the maintenance guard.
   const role = opts.databaseAccess === "none" ? "sqlite-maintenance" : (opts.role ?? "gateway");
   const paths = resolveGatewayLockPaths(env, opts.lockDir);
@@ -429,13 +516,12 @@ export async function acquireGatewayLock(
   const startedAt = now();
   const heartbeatWaitMs = GATEWAY_OWNER_HEARTBEAT_STALE_MS + 5_000;
   const heartbeatDeadlineMs = startedAt + heartbeatWaitMs;
+  const gatewayTimeoutMs = singleOwner
+    ? MOBILE_SINGLE_OWNER_LOCK_TIMEOUT_MS
+    : GATEWAY_LIFECYCLE_LOCK_TIMEOUT_MS;
   const timeoutMs = resolveTimerTimeoutMs(
     opts.timeoutMs,
-    role === "gateway"
-      ? GATEWAY_LIFECYCLE_LOCK_TIMEOUT_MS
-      : role === "sqlite-maintenance"
-        ? heartbeatWaitMs
-        : 0,
+    role === "gateway" ? gatewayTimeoutMs : role === "sqlite-maintenance" ? heartbeatWaitMs : 0,
     0,
   );
   const deadlineMs = Math.min(opts.lifecycleDeadlineMs ?? Infinity, startedAt + timeoutMs);
@@ -490,6 +576,7 @@ export async function acquireGatewayLock(
             payload,
             projectionPath: paths.stateLockPath,
             getProjection: () => projection,
+            singleOwner,
           });
           try {
             if (opts.databasePortRecovery) {
@@ -500,7 +587,7 @@ export async function acquireGatewayLock(
             } else {
               assertDatabasePortStartupAllowed(paths.stateDir);
             }
-            await assertHistoricalGatewayOwnerStopped(paths, opts);
+            await assertHistoricalGatewayOwnerStopped(paths, opts, singleOwner);
             if (!opts.databasePortRecovery && opts.databaseAccess !== "none") {
               try {
                 await owner.run(() => {
@@ -508,7 +595,20 @@ export async function acquireGatewayLock(
                   if (role === "gateway") {
                     ensureOpenClawStatePermissions(databasePath, env, { createDirectory: true });
                   }
-                  return assertGatewayOwnerLeaseStopped(env, owner, role === "sqlite-maintenance");
+                  // F2 single-owner: skip the owner-lease assertion. Polones
+                  // deletes the `gateway-owner` lease row before spawn, so
+                  // there is nothing to assert — and a stale row left by a
+                  // killed Gateway must not block this boot. The state-owner
+                  // file (acquired above, with the weaker death proof) plus
+                  // the exclusive TCP bind (N2) remain the guards.
+                  if (!singleOwner) {
+                    return assertGatewayOwnerLeaseStopped(
+                      env,
+                      owner,
+                      role === "sqlite-maintenance",
+                    );
+                  }
+                  return undefined;
                 });
               } catch (error) {
                 databaseFailure = { error };
@@ -617,8 +717,17 @@ export async function acquireGatewayLock(
         lockPath: paths.stateLockPath,
         payload: LockPayloadSchema.safeParse(previous).data ?? null,
         platform: opts.platform ?? process.platform,
+        singleOwner,
       });
-    if (!borrowedOwner) {
+    if (!borrowedOwner && !singleOwner) {
+      // F2 single-owner: skip the `gateway.state.lock` file-lock
+      // projection entirely. Polones already guarantees exclusivity from
+      // outside (and sweeps this file before spawn), so the projection
+      // buys nothing here — and creating it would re-impose the exact
+      // stale-lock wait this fast-path removes. The state-owner file
+      // (acquired above) stays the on-disk ownership record, and the
+      // exclusive TCP bind (N2) stays the live-process guard. Upstream
+      // (singleOwner false) always creates the projection, as before.
       projection = createGatewayStateProjection(
         acquireFileLockSync(paths.stateLockPath, {
           lockPath: paths.stateLockPath,

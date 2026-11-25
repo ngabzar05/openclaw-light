@@ -96,7 +96,11 @@ export async function startGatewayServer(
   const ownedLock = serverOpts.gatewayStateOwner
     ? null
     : await measureGatewayBootstrapStep("gateway.lock-acquire", () =>
-        acquireGatewayLock({ port, listenerMode: "foreground" }),
+        // F2 (fork: Lane C): `mobileBoot` (resolved once in
+        // `startGatewayServer` above) reaches the lock acquisition here
+        // for direct/embed callers; the CLI path passes it via
+        // `prepareGatewayRunLoop` instead.
+        acquireGatewayLock({ port, listenerMode: "foreground", mobileBoot }),
       );
   const gatewayStateOwner = serverOpts.gatewayStateOwner ?? ownedLock ?? undefined;
   let close: GatewayServer["close"] | undefined;

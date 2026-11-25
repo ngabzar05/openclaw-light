@@ -22,6 +22,12 @@ set -u
 umask 0077
 LABEL="${1:-run1}"
 TIMEOUT_S="${2:-900}"
+# Temp root OpenClaw menolak ancestor yang group/world-writable tanpa
+# sticky bit — umask sesi ini 0007, jadi paksa 0077 agar semua dir lab 700.
+# (Perbaikan Lane C #2: mkdir HARUS sebelum flock — sesudah restart VM
+# /tmp kosong dan redirect lock gagal sebelum mkdir tercapai.)
+mkdir -p /tmp/lane-a-lab
+chmod 700 /tmp/lane-a-lab
 # Cegah dua run berlabel sama jalan bersamaan (penulis timings.tsv ganda
 # menkontaminasi hasil — pernah terjadi run1-off): kunci per label.
 exec 9>"/tmp/lane-a-lab/.measure-$LABEL.lock"

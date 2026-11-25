@@ -38,12 +38,15 @@ export async function prepareGatewayRunLoop(
     lockPort?: number;
     lifecycleLockDeadlineMs?: number;
     /**
-     * Mobile boot profile (fork: A1), resolved once by the CLI gateway-run
-     * path. Lane C (F2) splice point: pass this into `acquireGatewayLock`
-     * below once that function accepts `MobileBootOptions` — this is the
-     * only lock acquisition on the CLI gateway-run path (direct servers
-     * acquire theirs in `src/gateway/server.ts`, from
-     * `GatewayServerOptions.mobileBoot`). Lane A wires no lock behavior.
+     * Mobile boot profile (fork: A1 + F2), resolved once by the CLI
+     * gateway-run path and passed into `acquireGatewayLock` below.
+     * `mobileBoot.singleOwner` activates the F2 fast-path (skip file-lock
+     * projection + lease assertion, 30 s contention deadline, weaker
+     * death proof) — only when A1 is on too. Direct servers acquire their
+     * lock in `src/gateway/server.ts`, from
+     * `GatewayServerOptions.mobileBoot`; in-process restart re-acquisition
+     * in `src/cli/gateway-cli/run-loop.ts` receives the same value via
+     * its `params.mobileBoot`.
      */
     mobileBoot?: MobileBootOptions;
   },
@@ -67,6 +70,12 @@ export async function prepareGatewayRunLoop(
         port: params.lockPort,
         listenerMode: supervisorMode ? "supervised" : "foreground",
         supervisor,
+        // F2 (fork: Lane C): the mobile boot profile reaches the lock
+        // acquisition here. `mobileBoot.singleOwner` activates the
+        // fast-path (skip file-lock projection + lease assertion, 30 s
+        // contention deadline, weaker death proof) — only when A1 is on
+        // too; otherwise this is pure upstream behavior.
+        mobileBoot: params.mobileBoot,
         ...(params.lifecycleLockDeadlineMs !== undefined
           ? { lifecycleDeadlineMs: params.lifecycleLockDeadlineMs }
           : {}),
