@@ -12,6 +12,7 @@ import type { PreparedConfigRecovery } from "../config/io.types.js";
 import { resolveConfigPath } from "../config/paths.js";
 import type { ConfigFileSnapshot } from "../config/types.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
+import { MOBILE_BOOT_DISABLED, type MobileBootOptions } from "../gateway/mobile-boot.js";
 import { resolveDatabaseEngineSelection } from "../infra/database-engine/config.js";
 import {
   getDatabaseEngineSelection,
@@ -30,6 +31,7 @@ import {
 import { completePluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.js";
 import type { PluginMetadataSnapshot } from "../plugins/plugin-metadata-snapshot.types.js";
 import { normalizeAgentId } from "../routing/session-key.js";
+import { createLazyRuntimeModule } from "../shared/lazy-runtime.js";
 import { readAgentDatabaseAdmissionRefusal } from "../state/agent-database-admission.js";
 import {
   withArtifactPreservingStateReads,
@@ -50,6 +52,25 @@ export type ConfigPreflightSnapshotRead = {
 
 // Match the five-minute startup migration lease budget, including slow cold starts.
 const STARTUP_STATE_ADMISSION_TIMEOUT_MS = 5 * 60_000;
+
+// F3(b) (fork): the database/session runtime modules are loaded through the
+// shared lazy-runtime pattern (`createLazyRuntimeModule`, same as
+// `src/commands/doctor-config-preflight.ts`) instead of bare dynamic
+// `import()` calls. The first use still happens inside admission (the
+// readiness checks below need these modules pre-listen), so this changes no
+// timing on first boot; it keeps the import behind one cached loader shared
+// with later importers of the same modules, and it is the seam a later lane
+// can defer without inventing a new lazy pattern. Behavior-neutral by
+// construction: same modules, same first-use point, same results.
+const loadDatabasePreflightRuntime = createLazyRuntimeModule(
+  () => import("../state/openclaw-database-preflight.js"),
+);
+const loadSessionStartupMigrationRuntime = createLazyRuntimeModule(
+  () => import("../config/sessions/startup-migration.js"),
+);
+const loadSessionTargetsRuntime = createLazyRuntimeModule(
+  () => import("../config/sessions/targets.js"),
+);
 let doctorIssuesModule:
   | Promise<typeof import("./doctor/shared/legacy-config-issues.js")>
   | undefined;
@@ -223,7 +244,17 @@ export async function readAdmittedConfigSnapshot(params: {
   beforeStatePreparation?: (snapshot: ConfigFileSnapshot) => Promise<boolean>;
   /** Startup alone migrates credentials after read admission releases its snapshot. */
   prepareClientCredentials?: (snapshot: ConfigFileSnapshot) => Promise<void>;
+  /**
+   * Mobile boot profile (fork: F3), resolved once by the CLI gateway-run
+   * path and threaded through the startup preflight. `enabled: false`
+   * (default) is pure upstream behavior. When enabled, the state-snapshot
+   * scope is lazy (F3(c)) — see the `admission.state-snapshot` call below.
+   * The plugin-config read itself is shaped by the caller-supplied
+   * `readSnapshot` (F3(a), see `src/commands/startup-config-preflight.ts`).
+   */
+  mobileBoot?: MobileBootOptions;
 }): Promise<ConfigPreflightSnapshotRead & { recovery?: PreparedConfigRecovery }> {
+  const mobileBoot = params.mobileBoot ?? MOBILE_BOOT_DISABLED;
   const readIdentity = () =>
     measureDoctorConfigPreflightStep("admission.device-identity", async () => {
       const { loadDeviceIdentityIfPresentAsync } =
@@ -336,6 +367,19 @@ export async function readAdmittedConfigSnapshot(params: {
             env: params.env,
             admissionTimeoutMs: STARTUP_STATE_ADMISSION_TIMEOUT_MS,
             reuseCleanClose: true,
+            // F3(c) (fork, mobile boot ON): the snapshot scope is lazy —
+            // shared-state bytes are prepared only when a reader inside this
+            // block actually demands them (`lazy: true`, upstream-supported;
+            // see `src/state/openclaw-state-db-readonly.ts`), instead of
+            // eagerly at scope entry. Readers that need bytes still get the
+            // same bytes (prepared on first demand). OFF keeps the eager
+            // upstream scope. Caveat, single-owner mobile only: the lazy
+            // scope does not wait out a pending admission the way the eager
+            // scope does — a concurrent writer holding admission while a
+            // reader asks would fail fast instead of waiting up to the
+            // admission timeout. Polones runs one Gateway owner (Opsi A),
+            // so no concurrent writer is expected.
+            ...(mobileBoot.enabled ? { lazy: true } : {}),
           },
         ),
       );
@@ -373,7 +417,7 @@ async function assertStartupStateReady(params: {
 }): Promise<void> {
   const { assertOpenClawDatabasesReady } = await measureDoctorConfigPreflightStep(
     "admission.database-runtime-import",
-    () => import("../state/openclaw-database-preflight.js"),
+    () => loadDatabasePreflightRuntime(),
   );
   const agentCount = listAgentIds(params.cfg).length;
   const admissionMetrics: Record<string, number> = { agentCount };
@@ -402,10 +446,7 @@ async function assertStartupStateReady(params: {
     { assertSessionStoreMigrationComplete },
     { resolveAllAgentSessionStoreCandidateTargetsSync },
   ] = await measureDoctorConfigPreflightStep("admission.session-runtime-import", () =>
-    Promise.all([
-      import("../config/sessions/startup-migration.js"),
-      import("../config/sessions/targets.js"),
-    ]),
+    Promise.all([loadSessionStartupMigrationRuntime(), loadSessionTargetsRuntime()]),
   );
   const targets = await measureDoctorConfigPreflightStep(
     "admission.session-targets",

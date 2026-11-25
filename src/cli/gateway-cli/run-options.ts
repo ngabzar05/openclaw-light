@@ -1,5 +1,6 @@
 // Source-aware gateway run option resolution shared by pre-action and runtime startup.
 import type { Command } from "commander";
+import type { MobileBootOptions } from "../../gateway/mobile-boot.js";
 import { inheritOptionFromParent } from "../command-options.js";
 
 export type GatewayRunOpts = Partial<
@@ -8,6 +9,14 @@ export type GatewayRunOpts = Partial<
 > & {
   /** @deprecated Use cliBackendLogs. */
   claudeCliLogs?: boolean;
+  /**
+   * Mobile boot profile (fork: A1/F3), resolved exactly once by the CLI
+   * gateway-run path (`tryRunGatewayRunFastPath`, `src/cli/run-main.ts`)
+   * and attached by the `beforeRun` hook — never resolved here. Direct
+   * callers that do not supply it fall back to a single env read in
+   * `runGatewayCommandOnce` (`src/cli/gateway-cli/run.ts`).
+   */
+  mobileBoot?: MobileBootOptions;
 };
 
 const GATEWAY_RUN_VALUE_KEYS = [

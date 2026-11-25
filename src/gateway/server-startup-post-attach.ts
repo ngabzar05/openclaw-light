@@ -16,6 +16,7 @@ import { getGatewayContextLifetime } from "../plugins/runtime/gateway-request-sc
 import type { PluginServiceCronHost } from "../plugins/service-cron.js";
 import type { PluginServicesHandle } from "../plugins/services.js";
 import { createDeferredCore } from "../shared/deferred.js";
+import { MOBILE_BOOT_DISABLED, type MobileBootOptions } from "./mobile-boot.js";
 import type { GatewayBroadcastFn, GatewayBroadcastToConnIdsFn } from "./server-broadcast-types.js";
 import type { GatewayControlUiRootLifecycle } from "./server-control-ui-root.js";
 import type { GatewayClient, GatewayContextResolver } from "./server-methods/shared-types.js";
@@ -44,6 +45,13 @@ export async function startGatewayPostAttachRuntime(params: {
   scheduler: GatewayScheduler;
   minimalTestGateway: boolean;
   updateCanary?: boolean;
+  /**
+   * Mobile boot profile (fork: F8), threaded from `GatewayServerOptions`
+   * via `finishGatewayStartup`. When enabled, the deferred update check
+   * is never started (Polones delivers updates via the APK, never via
+   * self-update). `undefined` means OFF (upstream).
+   */
+  mobileBoot?: MobileBootOptions;
   cfgAtStart: OpenClawConfig;
   getConfig: () => OpenClawConfig;
   port: number;
@@ -454,7 +462,21 @@ export async function startGatewayPostAttachRuntime(params: {
     await sidecarsPromise;
   }
   if (!params.minimalTestGateway && !candidateCanary) {
-    updateCheck.start();
+    // F8 (fork, mobile boot ON): the self-update check is disabled —
+    // updates arrive through the Polones APK, so there is nothing to
+    // check for and no reason to spend a post-attach cycle on it. The
+    // deferred handle above is still created and registered as a
+    // lifetime sidecar (its `stop` on a never-started check is a safe
+    // no-op), so the returned `stopGatewayUpdateCheck` stays valid.
+    // OFF starts the check exactly like upstream.
+    const mobileBoot = params.mobileBoot ?? MOBILE_BOOT_DISABLED;
+    if (mobileBoot.enabled) {
+      params.log.info(
+        "mobile boot: self-update check disabled (updates are delivered through the Polones APK)",
+      );
+    } else {
+      updateCheck.start();
+    }
   }
   const startupSettled =
     params.sidecarStartup === "defer"

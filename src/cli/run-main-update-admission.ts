@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { MobileBootOptions } from "../gateway/mobile-boot.js";
 import {
   consumeRootCommandOptionToken,
   getCommandArgsWithRootOptions,
@@ -16,6 +17,29 @@ export function isUpdateAdmissionInvocation(
     invocation.commandPath.length === 2 &&
     invocation.commandPath[0] === "update" &&
     ["admit", "preflight"].includes(invocation.commandPath[1] ?? "")
+  );
+}
+
+/**
+ * Mobile-boot refusal for update admission (fork: F8). Pure decision
+ * helper, tested directly: under mobile boot the self-update path is
+ * removed — Polones delivers updates through the APK, never via
+ * `openclaw update` — so an `update admit`/`preflight` invocation is
+ * refused with this message (the caller prints it and exits 2) instead
+ * of running admission. Returns `undefined` when the invocation is not
+ * update admission, or when mobile boot is OFF (upstream runs admission).
+ */
+export function resolveUpdateAdmissionMobileBootRefusal(
+  mobileBoot: MobileBootOptions,
+  invocation: ReturnType<typeof resolveCliArgvInvocation>,
+): string | undefined {
+  if (!mobileBoot.enabled || !isUpdateAdmissionInvocation(invocation)) {
+    return undefined;
+  }
+  return (
+    "Self-update admission is disabled in this mobile-boot fork build " +
+    "(OPENCLAW_MOBILE_BOOT=1): updates are delivered through the Polones APK, " +
+    "not by `openclaw update`. Refusing `update admit`/`preflight`."
   );
 }
 

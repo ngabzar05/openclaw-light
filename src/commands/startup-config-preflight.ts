@@ -2,6 +2,7 @@ import { cloneEnvWithPlatformSemantics } from "../config/config-env-vars.js";
 import type { ConfigSnapshotReadMeasure, ConfigSnapshotReadOptions } from "../config/io.js";
 import { resolveStateDir } from "../config/paths.js";
 import type { ConfigFileSnapshot } from "../config/types.js";
+import { MOBILE_BOOT_DISABLED, type MobileBootOptions } from "../gateway/mobile-boot.js";
 import { withEngineStoreAdmission } from "../infra/database-engine/admission-scope.js";
 import { getDatabaseEngineSelection } from "../infra/database-engine/context.js";
 import { assertDatabasePortStartupAllowed } from "../infra/database-port-recovery.js";
@@ -38,6 +39,15 @@ export type StartupConfigPreflightOptions = {
   measure?: ConfigSnapshotReadMeasure;
   validateStartupConfig?: (snapshot: ConfigFileSnapshot) => void | Promise<void>;
   beforeStatePreparation?: (snapshot?: ConfigFileSnapshot) => Promise<boolean>;
+  /**
+   * Mobile boot profile (fork: F3), resolved once by the CLI gateway-run
+   * path and threaded through the gateway bootstrap. `enabled: false`
+   * (default) is pure upstream behavior. When enabled, the preflight
+   * snapshot read is core-only (F3(a)) and the state-snapshot scope is
+   * lazy (F3(c)); see `prepareStartupConfig` and
+   * `readAdmittedConfigSnapshot`.
+   */
+  mobileBoot?: MobileBootOptions;
 };
 
 export type StartupConfigPreflightResult = ReturnType<typeof result> & {
@@ -94,14 +104,26 @@ async function prepareStartupConfig(
   snapshots: ReturnType<typeof createConfigPreflightSnapshotReader>,
 ): Promise<StartupConfigPreflightResult> {
   let env = process.env;
+  const mobileBoot = options.mobileBoot ?? MOBILE_BOOT_DISABLED;
   const measure: ConfigSnapshotReadMeasure = options.measure ?? (async (_name, run) => await run());
   const readSnapshot = (readOptions?: Pick<ConfigSnapshotReadOptions, "isolateEnv">) =>
     snapshots.read({
       purpose: "startup",
       allowCurrentPluginMetadata: false,
-      includePluginMetadata: true,
+      // F3(a) (fork, mobile boot ON): the preflight reads CORE config only —
+      // no plugin-metadata discovery pass inside `gateway-run-bootstrap`.
+      // The full plugin-metadata read still happens pre-listen, once, in
+      // the CLI gateway-run path (`readGatewayStartupConfig`,
+      // `src/cli/gateway-cli/run.ts`), which feeds the server bootstrap;
+      // the preflight was paying for the same discovery a second time
+      // (its cache used to be adopted into the process cache). Core
+      // config validation (gateway.mode, exit 78) is unaffected: it runs
+      // on the core snapshot here and again on the full snapshot there.
+      // Plugin validation issues therefore surface in run.ts's read,
+      // still pre-listen. OFF keeps the full metadata read.
+      includePluginMetadata: !mobileBoot.enabled,
       isolateEnv: readOptions?.isolateEnv,
-      skipPluginValidation: false,
+      skipPluginValidation: mobileBoot.enabled,
       observe: options.gateway ? false : options.observe,
       measure,
     });
@@ -127,6 +149,7 @@ async function prepareStartupConfig(
       readSnapshot,
       validateConfig: options.validateStartupConfig,
       beforeStatePreparation,
+      mobileBoot,
       prepareClientCredentials: async (snapshot) => {
         const { prepareStartupClientCredentials } = await import("./startup-client-credentials.js");
         // Repair modes broadened by remount before strict startup credential reads.

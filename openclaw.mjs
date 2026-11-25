@@ -720,7 +720,30 @@ async function runLauncher() {
       // OK
     } else {
       await installProcessWarningFilter();
-      if (await tryImport("./dist/entry.js")) {
+      // Fork (F6, A1): a foreground gateway run under mobile boot uses
+      // the gateway-only entry (`dist/entry-gateway.js`), which imports
+      // only the gateway-run path (no update admission, no help fast
+      // paths). The truthy check mirrors `isTruthyEnvValue`
+      // (`src/infra/env.ts`: "true"/"1"/"yes"/"on", case-insensitive);
+      // the launcher is plain JS, so it is replicated here rather than
+      // imported. OFF — or a missing gateway entry (e.g. a stale dist) —
+      // falls back to the upstream `entry.js`.
+      const mobileBootOn = ["true", "1", "yes", "on"].includes(
+        process.env.OPENCLAW_MOBILE_BOOT?.trim().toLowerCase() ?? "",
+      );
+      if (foregroundGateway && mobileBootOn) {
+        if (await tryImport("./dist/entry-gateway.js")) {
+          // OK
+        } else if (await tryImport("./dist/entry-gateway.mjs")) {
+          // OK
+        } else if (await tryImport("./dist/entry.js")) {
+          // OK
+        } else if (await tryImport("./dist/entry.mjs")) {
+          // OK
+        } else {
+          throw new Error(await buildMissingEntryErrorMessage());
+        }
+      } else if (await tryImport("./dist/entry.js")) {
         // OK
       } else if (await tryImport("./dist/entry.mjs")) {
         // OK

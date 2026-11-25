@@ -246,6 +246,7 @@ export async function finishGatewayStartup(params: {
           scheduler: runtime.scheduler,
           minimalTestGateway,
           updateCanary: opts.updateCanary,
+          mobileBoot: opts.mobileBoot,
           cfgAtStart,
           getConfig: getRuntimeConfig,
           port,

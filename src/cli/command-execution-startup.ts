@@ -1,4 +1,5 @@
 import type { StartupConfigPreflightOptions } from "../commands/startup-config-preflight.js";
+import { MOBILE_BOOT_DISABLED, type MobileBootOptions } from "../gateway/mobile-boot.js";
 import { routeLogsToStderr } from "../logging/console.js";
 import type { RuntimeEnv } from "../runtime.js";
 import { createLazyImportLoader } from "../shared/lazy-promise.js";
@@ -47,8 +48,16 @@ export async function ensureCliExecutionBootstrap(params: {
   allowInvalid?: boolean;
   beforeStatePreparation?: StartupConfigPreflightOptions["beforeStatePreparation"];
   loadPlugins?: boolean;
+  /**
+   * Mobile boot profile (fork: F3), resolved once by the CLI gateway-run
+   * path and threaded through the startup preflight. `undefined` means
+   * OFF (upstream). Other callers (preaction, route, mac-worker-entry)
+   * do not supply it and stay upstream.
+   */
+  mobileBoot?: MobileBootOptions;
 }) {
   const { runtime, commandPath, startupPolicy, allowInvalid, beforeStatePreparation } = params;
+  const mobileBoot = params.mobileBoot ?? MOBILE_BOOT_DISABLED;
   const { suppressDoctorStdout, pluginRegistry, skipConfigGuard, validateConfigOnly } =
     startupPolicy;
   const loadPlugins = params.loadPlugins ?? startupPolicy.loadPlugins;
@@ -65,6 +74,7 @@ export async function ensureCliExecutionBootstrap(params: {
         ...(validateConfigOnly ? { validateConfigOnly: true } : {}),
         ...(beforeStatePreparation ? { beforeStatePreparation } : {}),
         ...(suppressDoctorStdout ? { suppressDoctorStdout: true } : {}),
+        mobileBoot,
       });
     });
   }
