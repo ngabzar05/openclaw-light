@@ -353,6 +353,11 @@ export function AgentTools(
     });
     return (
       <SettingsSection title={t("agentTools.catalogTitle")}>
+        {/* W1: core groups are already shown; plugin groups are still
+            building on the gateway and arrive via a background re-request. */}
+        <Show when={props.catalog?.pluginCatalogPending === true}>
+          <SettingsLoadingSkeleton label={t("agentTools.loadingCatalog")} />
+        </Show>
         <div class="agents-panel-body agent-tools-grid">
           <For each={toolSections()} keyed={(section) => section.id}>
             {(section) => {

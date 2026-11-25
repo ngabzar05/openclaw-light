@@ -11,6 +11,7 @@ import { NODE_DESKTOP_SERVICE_CONTEXT } from "./desktop/node-source-context.js";
 import { invalidateGatewayDeviceRevocation } from "./device-revocation.js";
 import { ScopeUpgradeCoordinator } from "./device-scope-upgrade.js";
 import { prepareGatewayRecipientProfile } from "./expected-profile.js";
+import { MOBILE_BOOT_DISABLED, type MobileBootOptions } from "./mobile-boot.js";
 import { publishOperatorRoleConfigChange } from "./operator-role-policy.js";
 import { WEBSOCKET_OPEN_READY_STATE } from "./server-constants.js";
 import type { startGatewayCoreRuntime } from "./server-core-runtime.js";
@@ -106,6 +107,11 @@ type GatewayRequestContextRuntime = Pick<
     channelAdmissionAudit?: GatewayRequestContext["channelAdmissionAudit"];
     sessionCompanion: NonNullable<GatewayRequestContext["sessionCompanion"]>;
     isConnectionActive: NonNullable<GatewayRequestContext["isConnectionActive"]>;
+    // Mobile fast-boot profile (fork: A1). The live core runtime carries
+    // it from the bootstrap return through the kernel state (`...bootstrap`)
+    // and the core runtime (`...runtime`); test runtimes omit it (absent =
+    // off, pure upstream). Optional so test-support literals need no change.
+    mobileBoot?: MobileBootOptions;
     clients: GatewayClientRegistry;
     gatewayTls: Pick<GatewayCoreRuntime["gatewayTls"], "enabled" | "fingerprintSha256">;
     nodeDesktopService?: GatewayCoreRuntime["nodeDesktopService"];
@@ -268,6 +274,10 @@ export function createGatewayRequestContext(
   const context: GatewayRequestContext = {
     trackExecution: (run) => connectionWork.track(run),
     deps: runtime.deps,
+    // Mobile fast-boot profile (fork: A1), resolved once at startup and
+    // carried on the kernel state via bootstrap (spread through the
+    // lifecycle into the core runtime). Absent = off (upstream).
+    mobileBoot: runtime.mobileBoot ?? MOBILE_BOOT_DISABLED,
     configRevisionProjector: params.configRevisionProjector,
     // Keep cron reads live so config hot reload can swap cron/store state without rebuilding
     // every handler closure that already holds this request context.

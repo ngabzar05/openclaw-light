@@ -241,4 +241,55 @@ describe("Agents tools catalog read", () => {
       expect(view.container.textContent).not.toContain("Showing built-in fallback list instead.");
     });
   });
+
+  it("renders core groups from a pending catalog and re-requests until plugin groups arrive (W1)", async () => {
+    const pending = {
+      ...createReadToolCatalog("main", "read"),
+      pluginCatalogPending: true,
+    } satisfies ToolsCatalogResult;
+    const full: ToolsCatalogResult = {
+      ...createReadToolCatalog("main", "read"),
+      groups: [
+        ...createReadToolCatalog("main", "read").groups,
+        {
+          id: "plugin:catalog-alpha",
+          label: "catalog-alpha",
+          source: "plugin",
+          pluginId: "catalog-alpha",
+          tools: [
+            {
+              id: "catalog-alpha",
+              label: "catalog-alpha",
+              description: "Alpha tool",
+              source: "plugin",
+              pluginId: "catalog-alpha",
+              defaultProfiles: [],
+            },
+          ],
+        },
+      ],
+    };
+    const read = vi
+      .fn<() => Promise<ToolsCatalogResult>>()
+      .mockResolvedValueOnce(pending)
+      .mockResolvedValueOnce(full);
+    const view = await mountCatalog(read);
+    await waitForSolid(() => expect(view.catalogCalls()).toHaveLength(1));
+    // Core groups render immediately from the pending result — the panel
+    // never falls back to the skeleton list while plugin groups build.
+    await waitForSolid(() => expect(view.preview()).toBe("read"));
+    expect(view.container.textContent).not.toContain("Showing built-in fallback list instead.");
+    // The skeleton's label is an aria-label, not visible text (note the
+    // trailing ellipsis in the i18n string).
+    expect(
+      view.container.querySelector('[aria-label="Loading runtime tool catalog…"]'),
+    ).not.toBeNull();
+    // The pending result schedules a background re-request (2 s default);
+    // the plugin group arrives without any user action.
+    await waitForSolid(() => expect(view.catalogCalls()).toHaveLength(2), { timeout: 5000 });
+    await waitForSolid(() => expect(view.container.textContent).toContain("catalog-alpha"), {
+      timeout: 5000,
+    });
+    expect(view.container.querySelector('[aria-label="Loading runtime tool catalog…"]')).toBeNull();
+  });
 });

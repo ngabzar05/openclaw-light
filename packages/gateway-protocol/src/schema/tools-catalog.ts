@@ -54,6 +54,14 @@ export const ToolsCatalogResultSchema = closedObject({
   agentId: NonEmptyString,
   profiles: Type.Array(ToolCatalogProfileSchema),
   groups: Type.Array(ToolCatalogGroupSchema),
+  /**
+   * Mobile fast-boot (fork, W1): true when the plugin groups are still
+   * being built in the background and this response carries core groups
+   * only. The UI re-requests until the plugin groups arrive. Absent/false
+   * means the catalog is complete. Never set when the mobile boot profile
+   * is off (upstream behavior is unchanged).
+   */
+  pluginCatalogPending: Type.Optional(Type.Boolean()),
 });
 
 export type ToolsCatalogParams = Static<typeof ToolsCatalogParamsSchema>;

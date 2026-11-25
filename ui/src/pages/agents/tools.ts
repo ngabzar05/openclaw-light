@@ -56,15 +56,87 @@ type CatalogRequest = {
   agentId: string;
 };
 
-export function createAgentToolsCatalog(options: ReadOptions) {
+export function createAgentToolsCatalog(
+  options: ReadOptions & {
+    /**
+     * Delay before re-requesting a pending (core-only) catalog. Test seam;
+     * default 2000 ms.
+     */
+    pendingRetryDelayMs?: number;
+    /** Max background re-requests while the catalog stays pending. Default 10. */
+    pendingRetryMaxAttempts?: number;
+  },
+) {
   let target: CatalogRequest | null = null;
   let accepted: CatalogRequest | null = null;
+  let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let pendingRetryAttempts = 0;
+  const pendingRetryDelayMs = options.pendingRetryDelayMs ?? 2000;
+  const pendingRetryMaxAttempts = options.pendingRetryMaxAttempts ?? 10;
   const [request, setRequest] = createSignal<{
     result: Promise<ToolsCatalogResult | null>;
   } | null>(null);
   const isCurrent = (current: CatalogRequest) =>
     target === current && options.isCurrent(current.client, current.generation, current.agentId);
+  // Hoisted as a local function (not only a method on the returned object)
+  // so the pending-retry timer below can call it.
+  function ensure(agentId: string, opts?: { preservePendingRetry?: boolean }) {
+    const { client, connected, requestGeneration: generation } = options.scope();
+    if (!client || !connected) {
+      return;
+    }
+    if (
+      target?.client === client &&
+      target.agentId === agentId &&
+      (target.generation === generation || target === accepted)
+    ) {
+      return;
+    }
+    // A pending-retry re-request keeps its attempt budget: resetting here
+    // would let the 2 s poll run forever whenever the gateway keeps
+    // answering core-only.
+    if (!opts?.preservePendingRetry) {
+      clearPendingRetry();
+      pendingRetryAttempts = 0;
+    }
+    accepted = null;
+    target = { client, generation, agentId };
+    const result = load(target);
+    // A hidden panel can leave the receipt unobserved until it is revisited.
+    void result.catch(() => undefined);
+    setRequest({ result });
+  }
   const read: () => ToolsCatalogResult | null = createMemo(async () => request()?.result ?? null);
+  function clearPendingRetry() {
+    if (pendingRetryTimer !== null) {
+      clearTimeout(pendingRetryTimer);
+      pendingRetryTimer = null;
+    }
+  }
+  function schedulePendingRetry(current: CatalogRequest) {
+    clearPendingRetry();
+    if (pendingRetryAttempts >= pendingRetryMaxAttempts) {
+      // Budget habis: biarkan hasil core-only tampil, tapi kosongkan target
+      // supaya ensure() berikutnya (panel dikunjungi ulang) bisa mencoba
+      // lagi dengan budget baru.
+      target = null;
+      accepted = null;
+      return;
+    }
+    pendingRetryAttempts += 1;
+    pendingRetryTimer = setTimeout(() => {
+      pendingRetryTimer = null;
+      if (!isCurrent(current)) {
+        return;
+      }
+      // W1: the gateway answered core groups while the plugin groups are
+      // still building. The accepted core-only result stays visible until
+      // the full catalog replaces it — never fall back to the skeleton.
+      accepted = null;
+      target = null;
+      ensure(current.agentId, { preservePendingRetry: true });
+    }, pendingRetryDelayMs);
+  }
   async function load(current: CatalogRequest) {
     try {
       const result = await current.client.request<ToolsCatalogResult>("tools.catalog", {
@@ -75,6 +147,9 @@ export function createAgentToolsCatalog(options: ReadOptions) {
         return null;
       }
       accepted = current;
+      if (result.pluginCatalogPending === true) {
+        schedulePendingRetry(current);
+      }
       return result;
     } catch (error) {
       if (!isCurrent(current)) {
@@ -85,6 +160,8 @@ export function createAgentToolsCatalog(options: ReadOptions) {
     }
   }
   function reset() {
+    clearPendingRetry();
+    pendingRetryAttempts = 0;
     target = null;
     accepted = null;
     setRequest(null);
@@ -92,25 +169,7 @@ export function createAgentToolsCatalog(options: ReadOptions) {
   return {
     read,
     request,
-    ensure(agentId: string) {
-      const { client, connected, requestGeneration: generation } = options.scope();
-      if (!client || !connected) {
-        return;
-      }
-      if (
-        target?.client === client &&
-        target.agentId === agentId &&
-        (target.generation === generation || target === accepted)
-      ) {
-        return;
-      }
-      accepted = null;
-      target = { client, generation, agentId };
-      const result = load(target);
-      // A hidden panel can leave the receipt unobserved until it is revisited.
-      void result.catch(() => undefined);
-      setRequest({ result });
-    },
+    ensure,
     reset,
     invalidate() {
       if (target !== accepted) {
