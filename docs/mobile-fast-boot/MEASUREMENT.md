@@ -706,3 +706,40 @@ model/API key — chat pertama tidak terukur di lab), ditambah: variansi
 antar-run di lingkungan ini sangat besar (test yang sama bervariasi
 46 ↔ 131 dtk) — 2× per kondisi adalah minimum, dan perbedaan <±4 dtk
 di `/health` harus dinyatakan sebagai noise, bukan efek lane.
+
+## 12. F4 (early-listen) — metode ukur + status
+
+Rencana ukur (belum jalan — lihat status di bawah): skrip yang sama
+(`docs/mobile-fast-boot/measure-baseline.sh <label>`, §2), 2× ON
+(`OPENCLAW_MOBILE_BOOT=1`) vs 2× OFF, dalam kondisi CPU yang sama.
+Variabel yang dibandingkan: `/health` 200 pertama (A), `/ready` 200
+pertama, `/` 200 pertama (proksi B), durasi `runtime.post-attach`,
+durasi `gateway.server-start-import`, dan keberadaan mark baru di
+`gateway.log`:
+
+- `runtime.early.deferred` (ON saja — bukti join ditunda),
+- `runtime.early.discovery-refreshed` (ON saja — bukti mitigasi
+  re-refresh discovery jalan).
+
+Perkiraan SEBELUM ukur (bukan hasil): F4(b) ≈0 ms di LAB native
+(`runtime.early` total ~40 ms di run2-off); F4(a) kecil di LAB
+(`server-start-import` 1,9 dtk, modul yang dipindah hanya sebagian
+kecil darinya). Nilai F4 yang sesungguhnya bersifat arsitektural +
+perangkat (di perangkat discovery/skills/cron jauh lebih mahal) —
+karena itu bagian ini TIDAK BOLEH diisi angka sebelum run dilakukan.
+
+**Status (25 Nov 2026, Lane G #2): PENDING — belum ada satu pun run
+F4.** `pnpm install` attempt 4 gagal di skrip `prepare`
+(`prepare-git-hooks.mjs` exit 1; EPERM tulis cache
+`OpenClawKit/.build/protocol/.cache/` + peringatan git worktree),
+lalu pemberitahuan keamanan sistem memblokir eksekusi lanjutan
+(build/test/ukur) sampai ada keputusan koordinator/user. Detail
+lengkap di `docs/mobile-fast-boot/F4-AUDIT.md` §6. Tabel ON vs OFF
+di bawah ini SENGAJA dikosongkan sampai run itu ada:
+
+| Run | `OPENCLAW_MOBILE_BOOT` | `/health` 200 (A) | `/ready` 200 | `/` 200 (proksi B) | `server-start-import` | `runtime.post-attach` |
+|---|---|---|---|---|---|---|
+| f4-run1-off | OFF | — | — | — | — | — |
+| f4-run2-off | OFF | — | — | — | — | — |
+| f4-run1-on | `=1` | — | — | — | — | — |
+| f4-run2-on | `=1` | — | — | — | — | — |
