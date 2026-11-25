@@ -112,6 +112,20 @@ build:runtime` exit 0 dalam 12m6s). Waiter build integrasi berjalan
 (`~/workspace/integration-build-waiter.sh`, log
 `~/workspace/integration-build-waiter.log`; `pnpm install --frozen-lockfile`
 di repo utama SUDAH selesai exit 0, 2m1d, `node_modules` 109 entri).
+
+**Reboot VM ~04:46 WIB (25 Nov)** — VM restart (uptime 1 mnt saat dicek
+04:47); waiter integrasi mati sesudah 45 cek tanpa jendela terbuka
+(MemAvailable 449 MB–1,4 GB, tidak pernah mendekati 5.500 MB) dan loop tunggu
+ikut mati (log-nya kosong). Waiter di-restart 04:49 WIB (pid 3191, cek 1:
+1.443 MB) + loop tunggu baru 60 mnt. Pola: MemAvailable turun stabil
+~50 MB/mnt saat tidak ada lane berjalan; jendela 5.500 MB terakhir terbuka
+~20 mnt sesudah reboot 02:42 WIB (6.119 MB, 03:02) — jendela paling mungkin
+terbuka tidak lama sesudah reboot. Tidak ada proses node/vitest/gateway
+tersisa; pemakai mem terbesar adalah daemon hatch (447 MB RSS) + replay apt
+pasca-reboot (proses sistem, jangan dibunuh). Bila jendela tidak terbuka
+dalam 180 cek waiter, build + ukur LAB terintegrasi butuh mesin/CI ber-heap
+≥4,4 GB.
+
 Sesudah build berhasil: ukur LAB 2× per kondisi (ON vs OFF) dengan
 `docs/mobile-fast-boot/measure-baseline.sh` + cek WebUI bisa-dipakai, lalu
 isi tabel di bawah ini.
