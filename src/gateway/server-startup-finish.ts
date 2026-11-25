@@ -332,7 +332,6 @@ export async function finishGatewayStartup(params: {
           // the Gateway server options.
           mobileBoot: runtime.mobileBoot,
           updateCanary: opts.updateCanary,
-          mobileBoot: opts.mobileBoot,
           cfgAtStart,
           getConfig: getRuntimeConfig,
           port,

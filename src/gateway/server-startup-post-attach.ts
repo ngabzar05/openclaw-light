@@ -109,8 +109,6 @@ export async function startGatewayPostAttachRuntime(params: {
    * already-running services, never a second first-start.
    */
   shouldStartDeferredPluginServices?: () => boolean;
-  /** Resolved mobile boot profile, threaded from the Gateway server options. */
-  mobileBoot?: MobileBootOptions;
   onStartupPluginsLoading?: () => void;
   onStartupPluginsLoaded?: (result: {
     pluginRegistry: PluginRegistry;
