@@ -126,6 +126,18 @@ pasca-reboot (proses sistem, jangan dibunuh). Bila jendela tidak terbuka
 dalam 180 cek waiter, build + ukur LAB terintegrasi butuh mesin/CI ber-heap
 ≥4,4 GB.
 
+**Diagnosis memori (05:50 WIB):** `/proc/meminfo` menunjukkan MemTotal
+8.125 MB, MemFree 153 MB, AnonPages hanya 291 MB, Cached 676 MB, Slab
+338 MB, dan total RSS semua proses hanya 270 MB — sekitar 6,3 GB "used"
+TIDAK terlihat dari dalam VM ini (bukan proses, bukan cache, bukan slab,
+bukan tmpfs). Kesimpulan: memori itu dipegang DI LUAR cell ini (host runtime
+/ cell lain yang berbagi mesin yang sama) dan TIDAK bisa dibebaskan dari
+dalam VM (drop_caches pun hanya membebaskan ~0,9 GB). Jendela 5.500 MB
+bergantung pada host, bukan pada pekerjaan di VM ini. Loop tunggu 60 mnt
+(04:49–05:49) habis tanpa jendela (cek waiter 59–61: 674/665/654 MB; load
+0,03 — sistem menganggur tapi memori tetap penuh). Waiter masih berjalan
+(pid 3191, cek 61/180, timeout ~07:49 WIB bila jendela tidak terbuka).
+
 Sesudah build berhasil: ukur LAB 2× per kondisi (ON vs OFF) dengan
 `docs/mobile-fast-boot/measure-baseline.sh` + cek WebUI bisa-dipakai, lalu
 isi tabel di bawah ini.
