@@ -14,28 +14,22 @@ import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission
 import { createDeferredCore } from "../shared/deferred.js";
 import { getAgentDatabaseStartupAdmission } from "../state/agent-database-startup.js";
 import { resolveGatewayAuth } from "./auth.js";
-import { diffGatewayReloadPaths } from "./config-diff.js";
-import {
-  buildGatewayReloadPlan,
-  listConfigReloadRefinementPrefixes,
-} from "./config-reload-plan.js";
+// F4(a): config-diff, config-reload-plan, plugin-node-capability,
+// server-agent-database-startup, server-methods/nodes.read,
+// server-runtime-config, server-tls-renewal, server/client-human-presence
+// and server/ws-origin-policy are loaded lazily at their (post-bind /
+// post-ready) points of use below, so they leave the pre-listen import
+// graph. Each module was verified side-effect-free at top level (only
+// function/const/class/type declarations; see docs/mobile-fast-boot/F4-AUDIT.md),
+// so loading it at first use instead of at server-start import time is
+// unobservable — OFF mode keeps the same call order and first-use points.
 import { isCustomPluginUiEnabled } from "./control-ui-plugin-policy.js";
 import { GATEWAY_EVENTS } from "./events.js";
-import {
-  indexPluginNodeCapabilitySurfaces,
-  reconcileClientPluginNodeCapabilities,
-} from "./plugin-node-capability.js";
 import { collectGatewayProcessMemoryUsageMb, finishGatewayRestartTrace } from "./restart-trace.js";
-import { activateGatewayAgentDatabaseStartup } from "./server-agent-database-startup.js";
 import type { GatewayKernelRuntime } from "./server-kernel-request-runtime.js";
 import { clearGatewayMaintenanceHandles } from "./server-maintenance-lifecycle.js";
-import { refreshConnectedNodeSurfaceCaches } from "./server-methods/nodes.read.js";
-import { assertGatewayRuntimeSecurityConfig } from "./server-runtime-config.js";
-import { startGatewayTlsRenewal } from "./server-tls-renewal.js";
 import type { GatewayHttpTransport } from "./server-transport-bridge.js";
-import { startWorkerHumanPresence } from "./server/client-human-presence.js";
 import { collectGatewayWorkerPoolMetrics } from "./server/process-vitals.js";
-import { disconnectDisallowedGatewayPolicyClients } from "./server/ws-origin-policy.js";
 import { DEFAULT_TERMINAL_DETACH_SECONDS } from "./terminal/session-limits.js";
 
 type GatewayLogger = ReturnType<typeof createSubsystemLogger>;
@@ -126,13 +120,20 @@ export async function finishGatewayStartup(params: {
     getPluginNodeCapabilities,
   } = runtime;
   const databaseStartupAdmission = getAgentDatabaseStartupAdmission();
+  // F4: mobile boot profile (A1). OFF = upstream behavior; only the
+  // early-runtime join deferral (F4(b)) and the human-presence call
+  // placement below read this flag. The lazy imports (F4(a)) load at
+  // their first-use points in both modes (see the import-block note).
+  const mobileBootEnabled = opts.mobileBoot?.enabled ?? false;
   const databasePreparationReady = createDeferredCore();
   const getReadiness = runtime.createHttpTransportOptions().getReadiness;
   const { attachGatewayWsConnectionHandler } = await startupTrace.measure(
     "gateway.ws-imports",
     () => import("./server/ws-connection.js"),
   );
-  if (workerEnvironmentService) {
+  if (workerEnvironmentService && !mobileBootEnabled) {
+    // F4(a): loaded lazily at first use (same call site as upstream).
+    const { startWorkerHumanPresence } = await import("./server/client-human-presence.js");
     await startWorkerHumanPresence({
       clients,
       service: workerEnvironmentService,
@@ -176,13 +177,32 @@ export async function finishGatewayStartup(params: {
   );
   await startupTrace.measure("http.listen", () => runtime.startListening());
   startupTrace.mark("http.bound");
+  if (mobileBootEnabled && workerEnvironmentService) {
+    // F4(a): presence tracking is best-effort and no client can exist
+    // before ws-attach + listen, so installing it here misses no
+    // transition (observeClients() picks up already-connected clients);
+    // it also keeps this module out of the pre-listen graph.
+    const { startWorkerHumanPresence } = await import("./server/client-human-presence.js");
+    await startWorkerHumanPresence({
+      clients,
+      service: workerEnvironmentService,
+      log,
+      registerSidecar: registerGatewayLifetimeSidecars,
+    });
+  }
   // Join independent preparation before channels start or failure cleanup retires its owners.
-  const requestRuntimeReady = runtime.ensureRequestRuntimeReady().then(() => {
+  const requestRuntimeReady = runtime.ensureRequestRuntimeReady().then(async () => {
     // Readiness is also the performance collector's evidence boundary. Flush the
     // terminal events for request-runtime spans before /readyz can become green.
     flushDiagnosticsTimeline();
     kernel.setDispatchReady(true);
     if (databaseStartupAdmission && !opts.updateCanary && !lifecycle.closePreludeStarted) {
+      // F4(a): loaded lazily here, after listen — its graph (agent scope,
+      // auth-profile sqlite, spawn broker, plugin registry scope) leaves
+      // the pre-listen import graph.
+      const { activateGatewayAgentDatabaseStartup } = await import(
+        "./server-agent-database-startup.js"
+      );
       activateGatewayAgentDatabaseStartup({
         admission: databaseStartupAdmission,
         preparationReady: databasePreparationReady.promise,
@@ -196,9 +216,20 @@ export async function finishGatewayStartup(params: {
     }
   });
   const earlyRuntimeReady = runtime.startEarlyRuntime();
-  await Promise.allSettled([requestRuntimeReady, earlyRuntimeReady]);
-  await requestRuntimeReady;
-  const earlyRuntime = await earlyRuntimeReady;
+  if (mobileBootEnabled) {
+    // F4(b): start the early runtime concurrently, but do NOT join it
+    // before post-attach. /ready still waits for post-attach below, and
+    // the early runtime is first needed by post-ready maintenance, where
+    // it is joined (see the late join after the ready mark). Skipping
+    // the join here also means an early-runtime failure surfaces later
+    // (at the late join) instead of before post-attach — the failure
+    // still fails startup, only after readiness was published.
+    startupTrace.mark("runtime.early.deferred");
+    await requestRuntimeReady;
+  } else {
+    await Promise.allSettled([requestRuntimeReady, earlyRuntimeReady]);
+    await requestRuntimeReady;
+  }
   const sessionDeliveryRecoveryMaxEnqueuedAt = Date.now();
   let postAttachRuntimeReturned = false;
   let scheduledServicesActivated = false;
@@ -309,6 +340,12 @@ export async function finishGatewayStartup(params: {
               startupState.pendingReason = "startup-sidecars";
               prepared.afterCommit();
               // Nodes can finish their handshake before deferred plugins attach.
+              // F4(a): loaded lazily here (post-attach) — its graph
+              // (capability tokens, scoped hosts) leaves the pre-listen graph.
+              const {
+                indexPluginNodeCapabilitySurfaces,
+                reconcileClientPluginNodeCapabilities,
+              } = await import("./plugin-node-capability.js");
               const nodeCapabilitySurfaces = indexPluginNodeCapabilitySurfaces(
                 getPluginNodeCapabilities(),
               );
@@ -376,6 +413,21 @@ export async function finishGatewayStartup(params: {
     }
   }
   finishGatewayRestartTrace("restart.ready", collectGatewayProcessMemoryUsageMb());
+  // F4(b): late join of the deferred early runtime — the first point
+  // after post-attach on every path (canary, minimal-test, and normal
+  // all pass through here). /ready was already published above, so this
+  // never delays readiness. In OFF mode the promise is already settled
+  // (joined before post-attach); this await is free.
+  const earlyRuntime = await earlyRuntimeReady;
+  if (mobileBootEnabled) {
+    // Post-attach may have run before the early runtime installed
+    // discovery, so its refreshAttachedGatewayDiscovery call inside
+    // onStartupPluginsLoaded was a no-op (discovery still null). Re-run
+    // it now with the current (post-publish) registry — idempotent: a
+    // second update with the same services is a no-op for discovery.
+    await runtime.refreshAttachedGatewayDiscovery(pluginRuntime.registry);
+    startupTrace.mark("runtime.early.discovery-refreshed");
+  }
   if (opts.updateCanary) {
     // Copied queues and jobs must not resume; the canary owns only startup probes.
     return { startupSettled: postAttachHandles.startupSettled };
@@ -384,6 +436,11 @@ export async function finishGatewayStartup(params: {
   activateScheduledServicesWhenReady();
 
   const { startManagedGatewayConfigReloader } = await import("./server-reload-managed.js");
+  // F4(a): loaded lazily here, post-ready. The reloader contract keeps
+  // this closure synchronous ((config, env?) => void — see
+  // server-reload-contracts.ts), so the module is imported once here,
+  // before the closure is built — not inside it.
+  const { assertGatewayRuntimeSecurityConfig } = await import("./server-runtime-config.js");
   const assertRuntimeSecurityConfig = (cfg: OpenClawConfig, env?: NodeJS.ProcessEnv) => {
     assertGatewayRuntimeSecurityConfig({
       cfg,
@@ -398,6 +455,9 @@ export async function finishGatewayStartup(params: {
       }),
     });
   };
+  // F4(a): loaded lazily here, post-ready — its graph (infra/tls/gateway)
+  // leaves the pre-listen import graph.
+  const { startGatewayTlsRenewal } = await import("./server-tls-renewal.js");
   const tlsRenewal = startGatewayTlsRenewal({
     scheduler: runtime.scheduler,
     runtime: gatewayTls,
@@ -448,6 +508,13 @@ export async function finishGatewayStartup(params: {
           const previousConfig = getRuntimeConfig();
           // Runtime defaults and startup overlays are not authored changes; they
           // must not classify a hot write as a restart and bypass this validation.
+          // F4(a): loaded lazily here (config-write path, post-ready) —
+          // the reload-plan graph (channel plugins, plugin runtime)
+          // leaves the pre-listen import graph.
+          const { buildGatewayReloadPlan, listConfigReloadRefinementPrefixes } = await import(
+            "./config-reload-plan.js"
+          );
+          const { diffGatewayReloadPaths } = await import("./config-diff.js");
           const plan = buildGatewayReloadPlan(
             diffGatewayReloadPaths(
               getRuntimeConfigSourceSnapshot() ?? configSnapshot.sourceConfig,
@@ -516,6 +583,15 @@ export async function finishGatewayStartup(params: {
       if (phase !== "committed") {
         return;
       }
+      // F4(a): loaded lazily here (reload-commit path, post-ready) —
+      // the node-surface and ws-origin-policy graphs leave the
+      // pre-listen import graph.
+      const { disconnectDisallowedGatewayPolicyClients } = await import(
+        "./server/ws-origin-policy.js"
+      );
+      const { refreshConnectedNodeSurfaceCaches } = await import(
+        "./server-methods/nodes.read.js"
+      );
       terminalSessions.updateDetachGraceMs(
         (nextConfig.gateway?.terminal?.detachedSessionTimeoutSeconds ??
           DEFAULT_TERMINAL_DETACH_SECONDS) * 1000,
