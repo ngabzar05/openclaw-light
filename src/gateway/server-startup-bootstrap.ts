@@ -12,6 +12,7 @@ import {
   readConfigFileSnapshotWithPluginMetadata,
   setAppliedRuntimeConfigSnapshot,
 } from "../config/io.js";
+import { createInvalidConfigError, isConfigReadFailure } from "../config/io.invalid-config.js";
 import { isNamedProfile, normalizeStateDirEnv, resolveStateDir } from "../config/paths.js";
 import { copyConfigResolutionFacts } from "../config/resolution-facts.js";
 import { captureConfigOverrideApplier } from "../config/runtime-overrides.js";
@@ -151,6 +152,26 @@ async function prepareGatewayServerBootstrapSelected(input: {
     });
     return read;
   });
+  // Fase 1 (fork: Lane F1-I, mobile boot ON only): the CLI pre-bind F3(a)
+  // enforcement is skipped so the socket can bind first — enforce the
+  // same invalid config HERE, post-bind, with the identical error. The
+  // socket answers 503 starting for a moment, then the process exits 78
+  // via `runGatewayCommand`'s `InvalidConfigError` path (N5: Polones
+  // relies on 78 for quarantine + one retry). Read failures already
+  // threw during the read above; a missing config (`exists === false`)
+  // is the `--allow-unconfigured` fresh-start case and is left alone.
+  // OFF never reaches this check with an invalid snapshot (the preflight
+  // + `run.ts` already blocked it), so the gate is ON-only by design.
+  if (mobileBoot.enabled) {
+    await startupTrace.measure("config.validate-post-bind", async () => {
+      const snapshot = startupConfigSnapshotRead.snapshot;
+      if (snapshot.exists && !snapshot.valid && !isConfigReadFailure(snapshot)) {
+        const { renderConfigValidationIssueLines } = await import("../config/issue-location.js");
+        const details = renderConfigValidationIssueLines(snapshot).join("\n");
+        throw createInvalidConfigError(snapshot.path, details || "Unknown validation issue.");
+      }
+    });
+  }
   const inspectStateOwnership = async (signal?: AbortSignal) => {
     normalizeStateDirEnv(process.env);
     // Preserve split-config roots and named profiles whose dotenv/socket defaults
