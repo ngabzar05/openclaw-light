@@ -430,7 +430,15 @@ export async function startGatewayPostAttachRuntime(params: {
                 loaderStatsBefore.sourceTransformFallbacks,
             ],
           ]);
-          await startupLog;
+          // Fase 1 (fork: Lane F1-I, mobile boot ON): do not block
+          // `/ready` on the startup log — it keeps writing in the
+          // background (its rejection is already swallowed at
+          // `startupLogPromise`, and `startupLogSettled` still settles
+          // via its owner, so `startupSettled` is unaffected). OFF
+          // keeps the await, so the log is complete before "ready".
+          if (!(params.mobileBoot ?? MOBILE_BOOT_DISABLED).enabled) {
+            await startupLog;
+          }
           if (params.isClosing?.()) {
             return pluginRegistry;
           }

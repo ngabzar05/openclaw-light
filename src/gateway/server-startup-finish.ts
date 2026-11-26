@@ -9,6 +9,7 @@ import { hashConfigRaw } from "../config/io.read-helpers.js";
 import { isNixMode } from "../config/paths.js";
 import type { OpenClawConfig } from "../config/types.openclaw.js";
 import { flushDiagnosticsTimeline } from "../infra/diagnostics-timeline.js";
+import { formatErrorMessage } from "../infra/errors.js";
 import type { createSubsystemLogger } from "../logging/subsystem.js";
 import { getActiveGatewayRootWorkCount } from "../process/gateway-work-admission.js";
 import { createDeferredCore } from "../shared/deferred.js";
@@ -126,6 +127,11 @@ export async function finishGatewayStartup(params: {
   // placement below read this flag. The lazy imports (F4(a)) load at
   // their first-use points in both modes (see the import-block note).
   const mobileBootEnabled = opts.mobileBoot?.enabled ?? false;
+  // Fase 1 (fork: Lane F1-I): the early-listen stub bundle, present only
+  // when `startGatewayServer` bound the socket pre-kernel (mobile boot
+  // ON). Direct `startGatewayServerCore` callers (tests, embedders) have
+  // no stub and keep the legacy flow.
+  const listenStub = opts.listenStub;
   const databasePreparationReady = createDeferredCore();
   // F1: under the mobile profile, the per-agent admission owner must not
   // migrate before the fleet-wide migration (upstream order: fleet-wide
@@ -196,7 +202,19 @@ export async function finishGatewayStartup(params: {
     }),
   );
   await startupTrace.measure("http.listen", () => runtime.startListening());
-  startupTrace.mark("http.bound");
+  if (listenStub) {
+    // Fase 1: the socket was bound by the stub before the kernel, so a
+    // mark here would time `http.bound` minutes late. The true bind span
+    // is recorded as the `gateway.listen-stub.bind` bootstrap step
+    // (replayed at mark("process.bootstrap")); this detail pins the same
+    // instant to the startup timeline with its true timestamps.
+    startupTrace.detail("http.bound", [
+      ["boundAtMs", listenStub.phase.boundAtMs],
+      ["startedAtMs", listenStub.phase.startedAtMs],
+    ]);
+  } else {
+    startupTrace.mark("http.bound");
+  }
   // F1: start the deferred fleet-wide session migration now that the
   // socket is bound. It runs in parallel with `runtime.post-attach`
   // below; agent RPCs stay gated (via the delayed `unlockStartupMethods`
@@ -204,7 +222,24 @@ export async function finishGatewayStartup(params: {
   // function awaits it before marking ready, so a migration failure
   // still fails startup exactly like the upstream pre-listen failure
   // did (N6 — deferred, never skipped).
+  // Fase 1 (N14): a settled migration failure must never fail silently.
+  // The rejection handler below records the failure (log + pendingReason
+  // + trace mark) the moment it settles; the G1 site further down throws
+  // when the failure already settled, and `startupSettled` (returned at
+  // the end) joins the migration promise so a LATER failure still ends
+  // the run loop promptly instead of hanging `/ready` until the Polones
+  // 480 s timeout.
+  let migrationFailure: { error: unknown } | undefined;
   if (deferredSessionMigration) {
+    void deferredSessionMigration.ready.then(undefined, (error: unknown) => {
+      migrationFailure = { error };
+      startupState.pendingReason = "session-migration-failed";
+      if (listenStub) {
+        listenStub.phase.pendingReason = "session-migration-failed";
+      }
+      startupTrace.mark("sessions.migration-failed");
+      log.error(`gateway: deferred session migration failed: ${formatErrorMessage(error)}`);
+    });
     startDeferredSessionMigration(deferredSessionMigration, {
       cfg: cfgAtStart,
       env: process.env,
@@ -507,13 +542,21 @@ export async function finishGatewayStartup(params: {
   if (minimalTestGateway) {
     databasePreparationReady.resolve();
   }
-  // F1: `/ready` must still imply "sessions admitted", as it did when
-  // admission ran pre-listen: await the deferred migration before the
-  // readiness publication below. A migration failure throws here and
-  // fails startup (N6), exactly like the upstream pre-listen failure.
-  // Skipped while closing: the close path already owns the failure.
-  if (deferredSessionMigration && !lifecycle.closePreludeStarted) {
-    await deferredSessionMigration.ready;
+  // Fase 1 (Opsi A, D-2): G1 removed. `/ready` no longer awaits the
+  // migration here — it is already gated on it by G2/G3
+  // (`unlockStartupMethods` awaits the migration before `chat.send`
+  // unlocks, and the readiness checker reports `chat-startup` until
+  // then), so this await only re-imposed the same wait. The migration
+  // still runs (started above, in parallel with post-attach) and its
+  // failure still fails startup: a failure that already settled throws
+  // here, fail-fast; a later failure rejects `startupSettled` below,
+  // which ends the run loop (exit 1 on first start) instead of hanging
+  // `/ready` until the Polones timeout (N14). `preparationReady` (the
+  // per-agent admission gate, resolved from the same settlement via
+  // `onSettled`) is unaffected — it still resolves only once the worker
+  // runtime started AND the migration settled.
+  if (migrationFailure && deferredSessionMigration && !lifecycle.closePreludeStarted) {
+    throw migrationFailure.error;
   }
   startupTrace.detail("memory.ready", [
     ...collectGatewayProcessMemoryUsageMb(),
@@ -524,6 +567,24 @@ export async function finishGatewayStartup(params: {
   const preparedReadiness = await getReadiness.prepare();
   if (!lifecycle.closePreludeStarted && preparedReadiness.publish().ready) {
     startupTrace.mark("ready");
+    if (listenStub) {
+      // Fase 1 (Opsi A, D-2): hand the stub socket to the full handler
+      // now that `/ready` means "can chat". Before this point the stub
+      // kept answering 503 starting for non-probe paths; from here the
+      // Control UI and chat serve through the full handler. The swap is
+      // a single ref assignment (no rebind, no dropped socket).
+      runtime.activateFullHttpHandler?.();
+      listenStub.phase.status = "ready";
+      listenStub.phase.pendingReason = "ready";
+      startupTrace.detail("listen.stub-to-ready", [
+        ["bindToReadyMs", Date.now() - listenStub.phase.boundAtMs],
+      ]);
+      void import("./server/listen-registration.js")
+        .then(({ updateGatewayRegistrationStatus }) =>
+          updateGatewayRegistrationStatus({ status: "ready" }),
+        )
+        .catch(() => {});
+    }
     if (sidecarStartup === "defer") {
       log.info("gateway ready");
     }
@@ -869,5 +930,22 @@ export async function finishGatewayStartup(params: {
   } else {
     startupTrace.detail("memory.post-ready", collectGatewayProcessMemoryUsageMb());
   }
-  return { startupSettled: postAttachHandles.startupSettled };
+  // Fase 1 (N14, Opsi A): join the migration promise into
+  // `startupSettled` on the FINAL return only — the canary and close
+  // returns above keep their original `startupSettled` (they must not
+  // wait on work that never starts in those paths). `Promise.all`
+  // rejects as soon as ANY input rejects, so a migration that settles
+  // with a failure AFTER the G1 site above rejects `startupSettled`
+  // promptly, and the run loop (which awaits it with reject) ends the
+  // process (exit 1 on first start) instead of leaving `/ready`
+  // hanging until the Polones 480 s timeout. The migration promise
+  // already has its rejection handler attached at the G1 site, so no
+  // unhandled rejection can leak from either side.
+  const startupSettled =
+    deferredSessionMigration && !lifecycle.closePreludeStarted
+      ? Promise.all([postAttachHandles.startupSettled, deferredSessionMigration.ready]).then(
+          () => undefined,
+        )
+      : postAttachHandles.startupSettled;
+  return { startupSettled };
 }
