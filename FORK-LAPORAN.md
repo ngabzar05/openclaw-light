@@ -1,6 +1,6 @@
 # LAPORAN — Rombak Arsitektur OpenClaw: Mobile Fast Boot (Fork)
 
-> **Status:** INTEGRASI SELESAI (5 lane: B/C/D/E/F merge ke `mobile-fast-boot` `7e0fe28d` + `b07d3587`, 25 Nov 2026); Lane G TERBLOKIR pemberitahuan keamanan (menunggu keputusan Lead/pemilik); build `dist/` terintegrasi + ukur LAB terintegrasi TERBLOKIR — waiter timeout sesudah 180 cek (VM tidak bisa membuka jendela 5.500 MB); butuh mesin/CI ber-heap ≥4,4 GB.
+> **Status:** INTEGRASI SELESAI (6 lane: B/C/D/E/F/G merge ke `mobile-fast-boot` — F4 `5c911ea6` 25 Nov 2026, lalu ke `main` fork `b741e515` 26 Nov 2026; 5 lane lain `7e0fe28d` + `b07d3587`, 25 Nov 2026); build `dist/` terintegrasi + ukur LAB terintegrasi TERBLOKIR — waiter timeout sesudah 180 cek (VM tidak bisa membuka jendela 5.500 MB); butuh mesin/CI ber-heap ≥4,4 GB.
 > **Basis:** `openclaw/openclaw` @ tag `v2026.11.6` (commit `06afb10d3272cc9deaf38ca6a3b7b839d5935638`).
 > **Repo fork lokal:** `~/workspace/openclaw-fork/` (remote `ngabzar05/openclaw` BELUM ada — fork 403, butuh admin org; pemilik yang buat).
 > **Target:** definisi B — "Buka → bisa dipakai dalam hitungan detik"; definisi A sedekat mungkin. Lantai gateway puluhan detik tetap berlaku.
@@ -30,7 +30,7 @@ Ringkasan arsitektur baru: proses depan tipis (ikat socket dulu, graf-sisa impor
 | D | F5 (capture async + lazy plugin) + A3 (cache rencana plugin) | ✅ SELESAI + MERGE (25 Nov 2026) | Commit `fddd35a9`; test 18/18; tsgo exit 0; 6 kegagalan regresi terbukti bukan regresi (kontrol basis); F5b SENGAJA tidak diimplementasikan (butuh design review); LAB tertunda (build terblokir). Dokumen `F5-A3-PLUGIN-LAZY-PLAN-CACHE.md` §7 (prosedur ukur) |
 | E | W1/W2/W3 (katalog malas + cache + bundle ringan) | ✅ SELESAI + MERGE (25 Nov 2026) | Commit `08af5d9d`; test 33/33; tsgo core+ui exit 0; LAB tertunda (§7.3/§7.4 TBD — butuh `dist/`); W3: tidak ada impor berat yang perlu dipindah. MEASUREMENT.md §7 |
 | F | F3 (pecah bootstrap) + F6 (code-split entry) + F8 (matikan update) + D2 (hapus prebuild non-arm64) | ✅ SELESAI + MERGE (25 Nov 2026) | Merge `7e0fe28d`; branch `lane-f/f3-f6-f8-d2`. F3: preflight core-only + import runtime lazy + snapshot malas (semua digated A1; penegakan plugin-invalid pindah ke `run.ts`, exit 78 tetap). F6: `src/entry-gateway.ts` + routing `openclaw.mjs` (gated A1) + prewarm `server-start.js` paralel. F8: tolak admission (exit 2) + skip update check pasca-attach. D2: skrip prune, 41 target / 1365,4 MiB di pohon install (prod ~60,4 MiB). Test: D2 5/5, F6 4/4, F8 10/10, F3 18/23 (5 timeout load, 0 gagal asersi; kontrol pristine membuktikan bukan regresi); oxlint 0 error. **TERBUKA: typecheck tsgo (terbunuh SIGTERM), build `dist/` + LAB 2× ON/OFF (terblokir sumber daya: `ui:build` OOM exit 137, tsdown butuh ≥4,4 GB heap vs ~1 GB tersedia, restart berulang). Resep + status lengkap: `docs/mobile-fast-boot/LANE-F.md`, `D2-PREBUILD-PRUNE.md`, `MEASUREMENT.md` §10–11. |
-| G | F4 (early-listen / proses depan tipis) | 🟡 KODE SELESAI, TERBLOKIR (25 Nov 2026) | KODE + TEST + DOKUMEN SELESAI (Lane G #2) tapi BELUM commit/build/test/ukur — TERBLOKIR pemberitahuan keamanan sistem atas `pnpm install` (lihat §0). Titik pisah ADA di `http.bound` (~26 dtk [LAB]); kemenangan di LAB native ~13 dtk post-attach. Lihat §3 vonis F4 |
+| G | F4 (early-listen / proses depan tipis) | ✅ SELESAI + MERGE (26 Nov 2026) | KODE + TEST + DOKUMEN SELESAI (Lane G #2, 25 Nov 2026); MERGE ke `mobile-fast-boot` commit `5c911ea6` (25 Nov 2026, atas `d8407b98`), lalu ke `main` fork `b741e515` (26 Nov 2026, + fix duplikat mobileBoot). Titik pisah ADA di `http.bound` (~26 dtk [LAB]); kemenangan di LAB native ~13 dtk post-attach. Catatan: F4 yang di-merge adalah lazy-import + tunda join, BUKAN proses depan tipis sesungguhnya (PLAN-OPENCODE-PARITY.md §1.2). Lihat §3 vonis F4; rujukan ukur F4 kini MEASUREMENT.md §12. |
 | H | Dokumentasi (rebase guide, build/publish, guardrail, verifikasi) | ✅ SELESAI (25 Nov 2026) | Commit `551ae494`; 4 dokumen, 1.480 baris. Butir [BELUM TERUKUR] menunggu Lane A/G + ronde perangkat (lihat VERIFY.md §5). |
 
 **Yang TIDAK dikerjakan:** F7 (compile cache jadi — DITOLAK); A2-R2 (shim health — DITOLAK); D1/D5/D6/D7/D8 (dilarang/belum terbukti).
@@ -76,8 +76,10 @@ Rantai merge: `1d9ecf44` → E `d6a4969e` → D `53384fb8` → C `ebcc0998` → 
 diambil versi Lane F karena memakai nilai `MOBILE_BOOT_DISABLED` yang
 didefinisikan di `mobile-boot.ts`). `server-startup-finish.ts`,
 `server-startup-bootstrap.ts`, `mobile-boot.ts` auto-merge bersih. Lane G
-(F4) TIDAK ikut merge (kode belum commit, terblokir pemberitahuan keamanan —
-lihat §0).
+(F4) kemudian MERGE: commit `d8407b98` (Lane G) di-merge ke `mobile-fast-boot`
+sebagai `5c911ea6` (25 Nov 2026), lalu ke `main` fork sebagai `b741e515`
+(26 Nov 2026, + fix duplikat mobileBoot). Status "TERBLOKIR" di §0/§2 sudah
+basi.
 
 ### 4.2 Angka ukur per lane (yang sudah terukur — [LAB])
 
@@ -169,7 +171,7 @@ isi tabel di bawah ini.
 
 ## 5. Yang masih butuh pemilik
 
-1. **Jawaban atas pemberitahuan keamanan sistem Lane G** (lihat §0) — apakah `pnpm install`/build/test fork boleh dilanjutkan (ideal: mencakup semua lane). Tanpa jawaban ini, F4 (inti arsitektur: proses depan tipis) tidak bisa di-commit/build/ukur.
+1. **Pemberitahuan keamanan sistem Lane G — SELESAI (26 Nov 2026):** pemilik menjawab "Ya, lanjutkan proses fork" (26 Nov 2026 04:19 WIB) atas pertanyaan keamanan dalam kata-kata biasa; F4 kemudian di-merge (`5c911ea6` → `main` `b741e515`). Item ini ditutup.
 2. **Remote `ngabzar05/openclaw`** — fork via web GitHub ke org `ngabzar05` (403, akun `azqifaiq02` bukan admin org), atau repo kosong + push.
 3. **Integrasi ke Polones** (langkah terpisah sesudah verifikasi): re-pin `scripts/openclaw/build.sh` + `release-pin.sha256` + test kontrak hash ke artefak fork.
 4. **Prestart ON + warm-run 7.5** (keputusan pemilik terpisah — satu-satunya jalan ke "terasa instan" tanpa fork).
