@@ -39,7 +39,11 @@ import { MAX_PREAUTH_PAYLOAD_BYTES } from "./server-constants.js";
 import type { ControlUiRootState } from "./server-control-ui-root.js";
 import { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";
 import { createGatewayHttpServer, getGatewayHttpRequestHandler, installPreboundGatewayHttpHandler } from "./server-http.js";
-import type { GatewayHttpHandlerRef, GatewayHttpRequestHandler } from "./server-http.types.js";
+import type {
+  GatewayHttpHandlerRef,
+  GatewayHttpRequestHandler,
+  GatewayHttpServerOptions,
+} from "./server-http.types.js";
 import { detachListenStubUpgradeHandler } from "./server/listen-stub.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";

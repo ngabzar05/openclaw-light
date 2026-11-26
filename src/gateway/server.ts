@@ -241,7 +241,7 @@ export async function startGatewayServer(
     // Fase 1: the stub already bound, so this is the listening moment —
     // the transport must not mark it again (see server-start.ts).
     if (listenStub) {
-      gatewayStateOwner?.markListening();
+      gatewayStateOwner?.markListening?.();
     }
     const server = await startGatewayServerWithRuntime(port, { ...serverOpts, gatewayStateOwner });
     let closing: Promise<void> | undefined;
