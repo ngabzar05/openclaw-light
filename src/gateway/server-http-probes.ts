@@ -120,6 +120,13 @@ export async function handleGatewayProbeRequest(
     body = JSON.stringify({ ok: true, status });
   }
   res.statusCode = statusCode;
+  // Fase 1 (fork: Lane F1-I): a 503 here means "starting, retry soon" —
+  // tell pollers (Polones tile, the stub placeholder) to come back in
+  // 1 s instead of hammering or backing off blindly. The stub handler
+  // sends the same header on its 503s, so both phases agree.
+  if (statusCode === 503) {
+    res.setHeader("Retry-After", "1");
+  }
   // Node suppresses the HEAD body but never synthesizes Content-Length; set it
   // explicitly so probes keep GET/HEAD header parity (RFC 9110 §8.6).
   res.setHeader("Content-Length", String(Buffer.byteLength(body)));
