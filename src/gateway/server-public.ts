@@ -82,6 +82,23 @@ export type GatewayServerOptions = {
    */
   bind?: import("../config/config.js").GatewayBindMode;
   /**
+   * Resolved primary bind host (Fase 1, fork: Lane F1-I). The CLI path
+   * passes the already-resolved `healthHost` (`run.ts`) so the
+   * early-listen stub binds exactly the host the kernel will serve;
+   * direct callers may leave it unset and the stub resolves it the same
+   * way the kernel does (`resolveGatewayBindHost`).
+   */
+  bindHost?: string;
+  /**
+   * Fase 1 (fork: Lane F1-I) — the early-listen stub bundle created by
+   * `startGatewayServer` (mobile boot ON only): a server already bound
+   * pre-kernel, its swappable handler ref, and the shared listen phase.
+   * The transport reuses the server; `finishGatewayStartup` swaps the
+   * handler at `mark("ready")`. Absent means the legacy flow (the
+   * transport creates and binds its own server).
+   */
+  listenStub?: import("./server/listen-stub.js").ListenStubBundle;
+  /**
    * Advanced override for the bind host, bypassing bind resolution.
    * Prefer `bind` unless you really need a specific address.
    */

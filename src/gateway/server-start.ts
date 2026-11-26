@@ -71,7 +71,10 @@ async function startGatewayServerWithSdkHost(
         // F9: lets `startListening` measure its sub-steps (bind,
         // portal ingress, sandbox host, plugin listeners).
         startupTrace: gatewayKernel.startupTrace,
-        onListening: opts.gatewayStateOwner?.markListening,
+        // Fase 1 (fork: Lane F1-I): with a prebound stub,
+        // `markListening` already ran at the stub bind in
+        // `startGatewayServer` — the transport must not mark it twice.
+        onListening: opts.listenStub ? undefined : opts.gatewayStateOwner?.markListening,
         deferHookWake: async (request) => {
           const owner = gatewayKernel.kernel.getReloadState().cronState;
           const defer = owner.deferHookWake;

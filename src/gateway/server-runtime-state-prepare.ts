@@ -522,6 +522,14 @@ export async function prepareGatewayKernelState(params: {
     getRuntimeConfig,
     bindHost,
     port,
+    // Fase 1 (fork: Lane F1-I): hand the stub-bound server to the
+    // transport so it reuses the socket instead of binding a second one.
+    ...(opts.listenStub
+      ? {
+          preboundListener: opts.listenStub.server,
+          preboundHandlerRef: opts.listenStub.handlerRef,
+        }
+      : {}),
     controlUiEnabled: opts.controlUiEnabled,
     controlUiBasePath,
     controlUiRoot: controlUiRootLifecycle.state,

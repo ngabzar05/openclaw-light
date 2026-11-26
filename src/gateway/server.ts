@@ -20,6 +20,13 @@ import {
   GatewayStartupCleanupError,
   rethrowGatewayStartupError,
 } from "./server-shutdown.js";
+import {
+  createListenPhase,
+  createListenStubServer,
+  markListenPhaseBound,
+  resolveListenStubSecrets,
+  type ListenStubBundle,
+} from "./server/listen-stub.js";
 
 export { truncateCloseReason } from "./server/close-reason.js";
 export type { GatewayServer, GatewayServerOptions } from "./server-public.js";
@@ -29,6 +36,102 @@ async function loadServerStart() {
     "gateway.server-start-import",
     () => import("./server-start.js"),
   );
+}
+
+/**
+ * Fase 1 (fork: Lane F1-I) — bind the early-listen stub (mobile boot ON
+ * only). This runs before the sqlite engine install, the lock and the
+ * kernel, so `/health` answers while the rest of startup still runs.
+ *
+ * Order notes (N2/N4): the exclusive TCP bind is the first exclusivity
+ * claim for direct callers; in the CLI path the run loop already holds
+ * the gateway lock before `startGatewayServer` is called, so the order
+ * there stays lock-then-bind exactly as today — the stub bind does not
+ * weaken it. No state is touched between bind and lock: the only write
+ * in the window is the atomic registration file, which no gateway
+ * treats as authority. The sqlite init keeps its proven position
+ * before the lock (it only loads the runtime; the state DB is first
+ * opened by the bootstrap, after the lock).
+ *
+ * Returns `undefined` (legacy flow) when the stub is skipped: TLS is
+ * enabled in the startup snapshot (a plain stub server cannot be
+ * upgraded to HTTPS — fail safe to the legacy flow, never serve TLS
+ * config over plain HTTP), or the caller is an update canary.
+ */
+async function bindListenStub(
+  port: number,
+  opts: GatewayServerOptions,
+): Promise<ListenStubBundle | undefined> {
+  const snapshotConfig = opts.startupConfigSnapshotRead?.snapshot.config;
+  if (snapshotConfig?.gateway?.tls?.enabled === true) {
+    const { createSubsystemLogger } = await import("../logging/subsystem.js");
+    createSubsystemLogger("gateway").warn(
+      "mobile boot early-listen disabled for this boot: gateway TLS is enabled and the stub binds plain HTTP",
+    );
+    return undefined;
+  }
+  // The CLI path already resolved this exact host (`healthHost` in
+  // run.ts, same inputs as the kernel's `resolveGatewayRuntimeConfig`).
+  // Direct callers resolve it the same way the kernel does.
+  const bindHost =
+    opts.bindHost ??
+    opts.host ??
+    (await (async () => {
+      const { resolveGatewayBindHost } = await import("./net.js");
+      return resolveGatewayBindHost(
+        opts.bind ?? snapshotConfig?.gateway?.bind,
+        snapshotConfig?.gateway?.customBindHost,
+      );
+    })());
+  const phase = createListenPhase({
+    port,
+    bindHost,
+    ...(opts.bootId ? { bootId: opts.bootId } : {}),
+    ...(opts.startupStartedAt ? { startedAtMs: opts.startupStartedAt } : {}),
+  });
+  const { server, handlerRef } = createListenStubServer(phase, resolveListenStubSecrets());
+  const { listenGatewayHttpServer } = await import("./server/http-listen.js");
+  try {
+    await measureGatewayBootstrapStep("gateway.listen-stub.bind", () =>
+      listenGatewayHttpServer({
+        httpServer: server,
+        bindHost,
+        port,
+        serviceName: "gateway",
+      }),
+    );
+  } catch (error) {
+    // Never leak the unbound server into the retry/close path.
+    await new Promise<void>((resolve) => {
+      try {
+        server.close(() => resolve());
+      } catch {
+        resolve();
+      }
+    });
+    throw error;
+  }
+  markListenPhaseBound(phase);
+  // Registration is best-effort and never fails startup (D-4).
+  try {
+    const { writeGatewayRegistration } = await import("./server/listen-registration.js");
+    await writeGatewayRegistration({
+      port,
+      bindHost,
+      bootId: phase.bootId,
+      startedAtMs: phase.startedAtMs,
+    });
+  } catch (error) {
+    const { createSubsystemLogger } = await import("../logging/subsystem.js");
+    createSubsystemLogger("gateway").warn(
+      `gateway registration file could not be written: ${formatErrorMessage(error)}`,
+    );
+  }
+  const { createSubsystemLogger } = await import("../logging/subsystem.js");
+  createSubsystemLogger("gateway").info(
+    `gateway listening (starting) on http://${bindHost === "0.0.0.0" ? "127.0.0.1" : bindHost}:${port} — /health live, /ready pending`,
+  );
+  return { server, handlerRef, phase };
 }
 
 async function closeWithRuntimeCleanup(
@@ -81,6 +184,17 @@ export async function startGatewayServer(
   const mobileBoot = opts.mobileBoot ?? resolveMobileBootOptions(process.env);
   const serverOpts: GatewayServerOptions = { ...opts, mobileBoot };
   installDatabaseProcessRole("gateway");
+  // Fase 1 (fork: Lane F1-I): bind the stub first (ON only, never for
+  // update canaries). Everything below — sqlite init, lock, broker,
+  // kernel — runs after `http.bound`. OFF keeps the legacy order byte
+  // for byte (N10).
+  const listenStub =
+    mobileBoot.enabled && !opts.updateCanary
+      ? await bindListenStub(port, serverOpts)
+      : undefined;
+  if (listenStub) {
+    serverOpts.listenStub = listenStub;
+  }
   const { installGatewayDatabaseEngine } = await import("./server-database-engine.js");
   await measureGatewayBootstrapStep("gateway.database-engine-install", () =>
     installGatewayDatabaseEngine(
@@ -124,6 +238,11 @@ export async function startGatewayServer(
     signal?.addEventListener("abort", onOwnerLost, { once: true });
     detachOwner = () => signal?.removeEventListener("abort", onOwnerLost);
     signal?.throwIfAborted();
+    // Fase 1: the stub already bound, so this is the listening moment —
+    // the transport must not mark it again (see server-start.ts).
+    if (listenStub) {
+      gatewayStateOwner?.markListening();
+    }
     const server = await startGatewayServerWithRuntime(port, { ...serverOpts, gatewayStateOwner });
     let closing: Promise<void> | undefined;
     const closeServer: GatewayServer["close"] = (closeOptions) => {
@@ -132,6 +251,12 @@ export async function startGatewayServer(
         await server.close(closeOptions);
         // A failed join retains ownership: another starter must not enter over live work.
         await ownedLock?.release();
+        // Fase 1: remove the early registration on clean close (a crash
+        // leaves a stale file; readers must check pid + bootId).
+        if (listenStub) {
+          const { removeGatewayRegistration } = await import("./server/listen-registration.js");
+          await removeGatewayRegistration().catch(() => {});
+        }
       })());
     };
     close = closeServer;
