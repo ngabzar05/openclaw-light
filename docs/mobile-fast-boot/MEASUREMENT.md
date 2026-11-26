@@ -743,3 +743,35 @@ di bawah ini SENGAJA dikosongkan sampai run itu ada:
 | f4-run2-off | OFF | — | — | — | — | — |
 | f4-run1-on | `=1` | — | — | — | — | — |
 | f4-run2-on | `=1` | — | — | — | — | — |
+
+## 13. Fase 1 (early-listen) — measure + trace baru (Lane F1-I, 26 Nov 2026)
+
+**Status: TERIMPLEMENTASI di fork, BELUM ADA RUN.** Tabel ON vs OFF di bawah ini SENGAJA dikosongkan sampai run LAB/perangkat ada — angka perkiraan ada di `PLAN-OPENCODE-PARITY.md` §4 Fase 1, bukan di sini.
+
+### 13.1 Measure/trace baru
+
+| Nama | Jenis | Kapan dicatat | Arti |
+|---|---|---|---|
+| `gateway.listen-stub.bind` | bootstrap step (`measureGatewayBootstrapStep`, di-replay di `mark("process.bootstrap")`) | ON saja, di `startGatewayServer` sebelum sqlite/lock/kernel | Waktu bind socket stub = `http.bound` yang sesungguhnya. Inilah A' (socket terikat). |
+| `http.bound` (detail) | `startupTrace.detail` dengan `boundAtMs` + `startedAtMs` | ON saja, di `finishGatewayStartup` sesudah `runtime.startListening()` | Menandai instant bind sejati (bukan titik `startListening` yang sudah lewat). OFF tetap `startupTrace.mark("http.bound")` seperti sebelumnya. |
+| `listen.stub-to-ready` | `startupTrace.detail` dengan `bindToReadyMs` | ON saja, di `mark("ready")` | Bind → ready: berapa lama shell placeholder tampil sebelum Control UI penuh mengambil alih. |
+| `config.validate-post-bind` | `startupTrace.measure` | ON saja, di `prepareGatewayServerBootstrap` | Penegakan F3(a) yang dipindah ke pasca-bind (invalid → throw → exit 78). |
+| `sessions.migration-failed` | `startupTrace.mark` | Bila migrasi settle dengan kegagalan (mode apa pun — handler dipasang selalu) | Bukti kegagalan migrasi tercatat (N14); disertai log error + `pendingReason = "session-migration-failed"`. |
+| `http.listen` | `startupTrace.measure` (sudah ada) | Kedua mode | Tetap dipertahankan — test `server-startup-minimal-boot` meng-assert measure ini ada dan `runtime.early` sesudahnya. |
+
+### 13.2 Yang diukur di run Fase 1 (resep)
+
+Sama seperti §12 (run LAB ON vs OFF, 2× tiap mode), dengan kolom tambahan:
+
+| Run | `OPENCLAW_MOBILE_BOOT` | A' `/health` 200 (stub) | `/` placeholder 200 | `/ready` 200 | `gateway.listen-stub.bind` | `listen.stub-to-ready` |
+|---|---|---|---|---|---|---|
+| f1-run1-off | OFF | — | — | — | n/a | n/a |
+| f1-run2-off | OFF | — | — | — | n/a | n/a |
+| f1-run1-on | `=1` | — | — | — | — | — |
+| f1-run2-on | `=1` | — | — | — | — | — |
+
+**Kriteria lolos (LAB):** ON: A' ≤15 dtk dan `/` placeholder 200 sebelum `/ready` 200; `gateway.listen-stub.bind` tercatat; `listen.stub-to-ready` tercatat; OFF: tidak ada `gateway.listen-stub.bind`, tidak ada berkas `gateway-registration.json`, `/health` tidak menjawab sebelum kernel bind. **Kriteria lolos (perangkat):** seperti PLAN §7 baris Fase 1 (A' ≤15 dtk cold, shell ≤20 dtk cold, `/ready` tetap jujur, tile Polones menampilkan status perantara dengan benar).
+
+### 13.3 Berkas registrasi (debug)
+
+`<stateDir>/gateway-registration.json` ditulis atomik di `http.bound` (status `starting`), di-update ke `ready` di `mark("ready")`, dihapus saat close bersih. Isi: `version`, `url`, `port`, `pid`, `bootId`, `status`, `startedAtMs`. TANPA password/token. Polones tidak membacanya di Fase 1. Berkas basi (crash) harus divalidasi pembaca via `pid` + `bootId` — tidak ada janji freshness dari sisi fork.
