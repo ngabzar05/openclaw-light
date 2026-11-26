@@ -38,7 +38,9 @@ import { bindGatewayControlUiIngressHost } from "./remote-control-ui-ingress-hos
 import { MAX_PREAUTH_PAYLOAD_BYTES } from "./server-constants.js";
 import type { ControlUiRootState } from "./server-control-ui-root.js";
 import { attachGatewayUpgradeHandler } from "./server-http-upgrades.js";
-import { createGatewayHttpServer, getGatewayHttpRequestHandler } from "./server-http.js";
+import { createGatewayHttpServer, getGatewayHttpRequestHandler, installPreboundGatewayHttpHandler } from "./server-http.js";
+import type { GatewayHttpHandlerRef, GatewayHttpRequestHandler } from "./server-http.types.js";
+import { detachListenStubUpgradeHandler } from "./server/listen-stub.js";
 import type { GatewayRequestContext } from "./server-methods/types.js";
 import { measureStartup, type GatewayStartupTrace } from "./server-startup-trace.js";
 import type { HookClientIpConfig, HooksRequestHandler } from "./server/hooks-request-handler.js";
@@ -89,6 +91,16 @@ export async function createGatewayHttpTransport(params: {
   onListening?: () => void;
   /** Test-instance listener held since allocation; caller closes it if construction fails. */
   testListener?: HttpServer;
+  /**
+   * Fase 1 (fork: Lane F1-I) — listener the early-listen stub already
+   * bound pre-kernel (mobile boot ON only). The transport reuses it for
+   * the primary bind host instead of creating a second server (which
+   * would fail EADDRINUSE on the same port). The full handler is
+   * installed into `preboundHandlerRef` only at `mark("ready")` — see
+   * `activateFullHttpHandler` in the return value.
+   */
+  preboundListener?: HttpServer;
+  preboundHandlerRef?: GatewayHttpHandlerRef;
   updateCanary?: boolean;
   controlUiEnabled?: boolean;
   controlUiBasePath: string;
@@ -145,6 +157,15 @@ export async function createGatewayHttpTransport(params: {
   getTailscaleIngressEndpoint: () => GatewayTailscaleIngressEndpoint | undefined;
   getMcpAppSandboxPort: () => number | undefined;
   ensureSandboxHostPort: () => Promise<number>;
+  /**
+   * Fase 1 (fork: Lane F1-I) — present only with a prebound listener.
+   * Swaps `preboundHandlerRef.current` to the full request handler.
+   * `finishGatewayStartup` calls this exactly once, at `mark("ready")`;
+   * until then the stub keeps answering 503 starting. Never call it
+   * before ready: the full handler must not serve while `chat.send` is
+   * still gated by `unlockStartupMethods`.
+   */
+  activateFullHttpHandler?: () => void;
   dispatchHookAgentTurn: (
     pluginId: string,
     params: Parameters<PluginRuntimeCore["hooks"]["dispatchHookAgentTurn"]>[0],
@@ -152,6 +173,30 @@ export async function createGatewayHttpTransport(params: {
 }> {
   const spawnBroker = getSpawnBroker();
   const runWithReadOnlyWorkers = captureSqliteReadOnlyWorkerScope();
+  if (params.preboundListener) {
+    // Fase 1: the stub must own exactly the endpoint the transport is
+    // about to serve — any mismatch is a startup failure, not a silent
+    // second server. Unlike the test listener this is not restricted to
+    // loopback: the stub binds the same primary host the kernel resolved.
+    const address = params.preboundListener.address();
+    if (
+      !address ||
+      typeof address === "string" ||
+      address.address !== params.bindHost ||
+      address.port !== params.port
+    ) {
+      throw new Error("Pre-bound gateway listener must own the configured HTTP endpoint");
+    }
+    if (params.gatewayTls?.enabled) {
+      throw new Error(
+        "Mobile boot early-listen (OPENCLAW_MOBILE_BOOT=1) cannot serve gateway TLS: " +
+          "the stub binds plain HTTP before config is read. Disable mobile boot or TLS.",
+      );
+    }
+    if (!params.preboundHandlerRef) {
+      throw new Error("Pre-bound gateway listener requires a handler ref");
+    }
+  }
   if (params.testListener) {
     const address = params.testListener.address();
     if (
@@ -343,12 +388,19 @@ export async function createGatewayHttpTransport(params: {
   });
   const reportUnattributableProxy = createGatewayUnattributableProxyReporter(params.log);
   let controlUiUpgradeHandler: ReturnType<typeof attachGatewayUpgradeHandler> | undefined;
+  // Fase 1: the full handler for the prebound server, stashed here so the
+  // transport can hand it over via `activateFullHttpHandler` at ready.
+  let preboundFullHandler: GatewayHttpRequestHandler | undefined;
   const createGatewayListener = (
     ingressTransport: GatewayIngressTransport,
     tlsOptions: GatewayTlsRuntime["tlsOptions"] | undefined,
     testListener?: HttpServer,
+    preboundListener?: HttpServer,
   ): HttpServer => {
-    const httpServer = createGatewayHttpServer({
+    const isPreboundHost = preboundListener !== undefined && ingressTransport.kind === "ordinary";
+    // Build the server options once: the prebound branch reuses them for
+    // the full handler without creating a second server.
+    const serverOptions: GatewayHttpServerOptions = {
       testListener,
       clients: params.clients,
       controlUiEnabled: params.controlUiEnabled,
@@ -382,7 +434,24 @@ export async function createGatewayHttpTransport(params: {
       tlsOptions,
       ingressTransport,
       reportUnattributableProxy,
-    });
+    };
+    let httpServer: HttpServer;
+    if (isPreboundHost) {
+      // Fase 1: reuse the stub-bound server for the primary host. The
+      // stub's request listeners stay (they dispatch through handlerRef);
+      // only its upgrade listener is removed so the real WS handler below
+      // is the sole upgrade listener. The full handler is installed into
+      // the WeakMap now but NOT into handlerRef — that swap happens at
+      // mark("ready") via activateFullHttpHandler.
+      if (!params.preboundHandlerRef) {
+        throw new Error("Pre-bound gateway listener requires a handler ref");
+      }
+      detachListenStubUpgradeHandler(preboundListener);
+      preboundFullHandler = installPreboundGatewayHttpHandler(preboundListener, serverOptions);
+      httpServer = preboundListener;
+    } else {
+      httpServer = createGatewayHttpServer(serverOptions);
+    }
     const upgradeHandler = attachGatewayUpgradeHandler({
       httpServer,
       controlUiBasePath: params.controlUiBasePath,
@@ -417,6 +486,9 @@ export async function createGatewayHttpTransport(params: {
       { kind: "ordinary" },
       params.gatewayTls?.enabled ? params.gatewayTls.tlsOptions : undefined,
       host === params.bindHost ? params.testListener : undefined,
+      // Fase 1: the primary host reuses the stub-bound server (if any);
+      // alias hosts get fresh servers as today.
+      host === params.bindHost ? params.preboundListener : undefined,
     );
     gatewayHttpServers.push(httpServer);
     httpServers.push(httpServer);
@@ -526,6 +598,111 @@ export async function createGatewayHttpTransport(params: {
     }
     return await startSandboxHost();
   };
+  // Fase 1 (fork: Lane F1-I) — `startListening` split into bind vs
+  // post-bind services (design §3.6). The stub binds the socket before
+  // the kernel, so by the time the transport exists the bind step below
+  // only binds the servers the stub did not already bind (alias hosts,
+  // Tailscale ingress); `startPostBindServices` keeps the portal /
+  // sandbox / plugin-listener work that used to hide inside the same
+  // await. `startListening` stays as the wrapper for existing callers
+  // (OFF + tests).
+  const bindGatewayListeners = async (): Promise<void> => {
+    // F9: `http.listen` was one opaque span in the LAB baseline; split it
+    // so the listen gap (221–304 dtk) can be attributed per sub-step.
+    if (tailscaleHttpServer) {
+      await measureStartup(params.startupTrace, "http.listen.tailscale-ingress", async () => {
+        await listenGatewayHttpServer({
+          httpServer: tailscaleHttpServer,
+          bindHost: "127.0.0.1",
+          port: 0,
+          retryEaddrinuse: false,
+          serviceName: "Tailscale gateway ingress",
+        });
+        const address = tailscaleHttpServer.address();
+        if (!address || typeof address === "string") {
+          throw new Error("Tailscale gateway ingress failed to resolve its loopback port");
+        }
+        tailscaleIngressEndpoint = { host: "127.0.0.1", port: address.port };
+        // Publish the private target before ordinary ingress can accept requests.
+        await params.prepareManagedTailscaleIngress?.(tailscaleIngressEndpoint);
+      });
+    }
+    const requiredAlias =
+      params.bindHost !== "127.0.0.1" && bindHosts.includes("127.0.0.1")
+        ? "127.0.0.1"
+        : undefined;
+    // Claim the trusted local endpoint before exposing the selected interface. This prevents
+    // another loopback listener from receiving credentials while startup is still resolving.
+    const listenOrder = requiredAlias
+      ? [requiredAlias, ...bindHosts.filter((host) => host !== requiredAlias)]
+      : bindHosts;
+    const boundHosts = new Set<string>();
+    await measureStartup(params.startupTrace, "http.listen.bind", async () => {
+      for (const host of listenOrder) {
+        const index = bindHosts.indexOf(host);
+        const server = gatewayHttpServers[index];
+        if (!server) {
+          throw new Error(`Missing gateway HTTP server for bind host ${host}`);
+        }
+        // Specific IPv4 modes rely on this canonical local endpoint for authenticated
+        // helpers. A collision must fail startup instead of sending credentials to it.
+        const requiredLoopbackAlias = host === requiredAlias;
+        try {
+          // Fase 1: a pre-bound server (stub or test listener) is already
+          // listening — binding it again would throw ERR_SERVER_ALREADY_LISTEN.
+          if (server !== params.testListener && server !== params.preboundListener) {
+            await listenGatewayHttpServer({
+              httpServer: server,
+              bindHost: host,
+              port: params.port,
+              retryEaddrinuse: !requiredLoopbackAlias,
+            });
+          }
+          boundHosts.add(host);
+        } catch (err) {
+          if (host === bindHosts[0] || requiredLoopbackAlias) {
+            throw err;
+          }
+          params.log.warn(
+            `gateway: failed to bind loopback alias ${host}:${params.port} (${String(err)})`,
+          );
+        }
+      }
+    });
+    httpBindHosts.push(...bindHosts.filter((host) => boundHosts.has(host)));
+    if (httpBindHosts.length === 0) {
+      throw new Error("Gateway HTTP server failed to start");
+    }
+    // Fase 1: with a prebound stub, `markListening` already ran at the
+    // stub bind in `startGatewayServer` — calling it again would mark
+    // listening twice. Without a stub this is the first (and only) call.
+    if (!params.preboundListener) {
+      params.onListening?.();
+    }
+  };
+  const startPostBindServices = async (): Promise<void> => {
+    if (!params.updateCanary) {
+      await measureStartup(params.startupTrace, "http.listen.portal-ingress", () =>
+        portalService.startIngress(),
+      );
+    }
+    // Published updaters retain the live sandbox port but already pass --update-canary.
+    if (!params.updateCanary && params.cfg.mcp?.apps?.enabled === true) {
+      await measureStartup(params.startupTrace, "http.listen.sandbox-host", () =>
+        startSandboxHost(),
+      );
+    }
+    if (!params.updateCanary) {
+      await measureStartup(params.startupTrace, "http.listen.plugin-listeners", () =>
+        startPluginLegacyListeners({
+          gatewayServer: httpServer,
+          httpServers,
+          getRegistry: resolvePluginRouteRegistry,
+          warn: (message) => params.logPlugins.warn(message),
+        }),
+      );
+    }
+  };
   const startListening = async (): Promise<void> => {
     if (startListeningPromise) {
       await startListeningPromise;
@@ -534,92 +711,8 @@ export async function createGatewayHttpTransport(params: {
     // Listening is idempotent for callers racing startup. A failure is terminal for this runtime
     // state; the startup owner tears down every partially bound HTTP/WS server before retrying.
     startListeningPromise = (async () => {
-      // F9: `http.listen` was one opaque span in the LAB baseline; split it
-      // so the listen gap (221–304 dtk) can be attributed per sub-step.
-      if (tailscaleHttpServer) {
-        await measureStartup(params.startupTrace, "http.listen.tailscale-ingress", async () => {
-          await listenGatewayHttpServer({
-            httpServer: tailscaleHttpServer,
-            bindHost: "127.0.0.1",
-            port: 0,
-            retryEaddrinuse: false,
-            serviceName: "Tailscale gateway ingress",
-          });
-          const address = tailscaleHttpServer.address();
-          if (!address || typeof address === "string") {
-            throw new Error("Tailscale gateway ingress failed to resolve its loopback port");
-          }
-          tailscaleIngressEndpoint = { host: "127.0.0.1", port: address.port };
-          // Publish the private target before ordinary ingress can accept requests.
-          await params.prepareManagedTailscaleIngress?.(tailscaleIngressEndpoint);
-        });
-      }
-      const requiredAlias =
-        params.bindHost !== "127.0.0.1" && bindHosts.includes("127.0.0.1")
-          ? "127.0.0.1"
-          : undefined;
-      // Claim the trusted local endpoint before exposing the selected interface. This prevents
-      // another loopback listener from receiving credentials while startup is still resolving.
-      const listenOrder = requiredAlias
-        ? [requiredAlias, ...bindHosts.filter((host) => host !== requiredAlias)]
-        : bindHosts;
-      const boundHosts = new Set<string>();
-      await measureStartup(params.startupTrace, "http.listen.bind", async () => {
-        for (const host of listenOrder) {
-          const index = bindHosts.indexOf(host);
-          const server = gatewayHttpServers[index];
-          if (!server) {
-            throw new Error(`Missing gateway HTTP server for bind host ${host}`);
-          }
-          // Specific IPv4 modes rely on this canonical local endpoint for authenticated
-          // helpers. A collision must fail startup instead of sending credentials to it.
-          const requiredLoopbackAlias = host === requiredAlias;
-          try {
-            if (server !== params.testListener) {
-              await listenGatewayHttpServer({
-                httpServer: server,
-                bindHost: host,
-                port: params.port,
-                retryEaddrinuse: !requiredLoopbackAlias,
-              });
-            }
-            boundHosts.add(host);
-          } catch (err) {
-            if (host === bindHosts[0] || requiredLoopbackAlias) {
-              throw err;
-            }
-            params.log.warn(
-              `gateway: failed to bind loopback alias ${host}:${params.port} (${String(err)})`,
-            );
-          }
-        }
-      });
-      httpBindHosts.push(...bindHosts.filter((host) => boundHosts.has(host)));
-      if (httpBindHosts.length === 0) {
-        throw new Error("Gateway HTTP server failed to start");
-      }
-      params.onListening?.();
-      if (!params.updateCanary) {
-        await measureStartup(params.startupTrace, "http.listen.portal-ingress", () =>
-          portalService.startIngress(),
-        );
-      }
-      // Published updaters retain the live sandbox port but already pass --update-canary.
-      if (!params.updateCanary && params.cfg.mcp?.apps?.enabled === true) {
-        await measureStartup(params.startupTrace, "http.listen.sandbox-host", () =>
-          startSandboxHost(),
-        );
-      }
-      if (!params.updateCanary) {
-        await measureStartup(params.startupTrace, "http.listen.plugin-listeners", () =>
-          startPluginLegacyListeners({
-            gatewayServer: httpServer,
-            httpServers,
-            getRegistry: resolvePluginRouteRegistry,
-            warn: (message) => params.logPlugins.warn(message),
-          }),
-        );
-      }
+      await bindGatewayListeners();
+      await startPostBindServices();
       startListeningComplete = true;
     })();
     await startListeningPromise;
@@ -632,6 +725,17 @@ export async function createGatewayHttpTransport(params: {
     wss,
     preauthConnectionBudget,
     portalService,
+    // Fase 1: swap the stub dispatcher to the full handler at ready.
+    // Absent without a prebound listener.
+    ...(params.preboundListener && params.preboundHandlerRef
+      ? {
+          activateFullHttpHandler: () => {
+            if (preboundFullHandler && params.preboundHandlerRef) {
+              params.preboundHandlerRef.current = preboundFullHandler;
+            }
+          },
+        }
+      : {}),
     getTailscaleIngressEndpoint: () => tailscaleIngressEndpoint,
     getMcpAppSandboxPort: () => mcpAppSandboxPort,
     ensureSandboxHostPort,
