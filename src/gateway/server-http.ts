@@ -35,3 +35,24 @@ export function createGatewayHttpServer(opts: GatewayHttpServerOptions): HttpSer
   });
   return server;
 }
+
+/**
+ * Fase 1 (fork: Lane F1-I) — install the full request handler on a
+ * server the early-listen stub already bound. Unlike
+ * `createGatewayHttpServer` this does NOT attach `request` /
+ * `checkContinue` / `checkExpectation` / `connect` / `close` listeners:
+ * the stub installed those once, dispatching through `handlerRef`, so
+ * the full handler takes over with the single `handlerRef.current`
+ * assignment the transport performs at `mark("ready")` — no listener is
+ * ever attached twice. Only the `WeakMap` entry is (re)pointed at the
+ * full handler, so `getGatewayHttpRequestHandler` keeps working for
+ * ingress routing. The caller owns the handover timing.
+ */
+export function installPreboundGatewayHttpHandler(
+  server: HttpServer,
+  opts: GatewayHttpServerOptions,
+): GatewayHttpRequestHandler {
+  const handler = createGatewayHttpRequestHandler(opts);
+  requestHandlers.set(server, handler);
+  return handler;
+}

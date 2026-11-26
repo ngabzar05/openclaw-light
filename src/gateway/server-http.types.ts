@@ -66,3 +66,15 @@ export type GatewayHttpRequestHandler = ((
   res: ServerResponse,
   expectation?: "continue" | "reject",
 ) => Promise<void>) & { dispose(): void };
+
+/**
+ * Fase 1 (fork: Lane F1-I) — a request handler that can be swapped
+ * atomically with one assignment. The early-listen stub installs a
+ * dispatcher reading `current`; the transport swaps in the full handler
+ * at `mark("ready")`. Owned by `listen-stub.ts` (which must stay
+ * dependency-free at load time and therefore cannot import
+ * `server-http.ts`); this type lives here so both sides share it.
+ */
+export type GatewayHttpHandlerRef = {
+  current: GatewayHttpRequestHandler;
+};
